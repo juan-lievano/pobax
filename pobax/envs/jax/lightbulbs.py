@@ -21,35 +21,35 @@ class LightBulbsState:
 
 class LightBulbs(Environment):
 
-
     def __init__(self,
-                 size: int,
                  config_path: str, 
                  ): 
         """
         size: How many light bulbs in the array.
         config_path: path to json with keys "goals" and "distribution" containing array of possible goals and likelihood of choosing each goal. 
         """
+        
+        self.size, self.goals, self.goal_distribution, self.robot_noop = self._load_config(config_path)
 
-        self.size = size
-        self.goals, self.goal_distribution = self._load_goals_from_json(config_path, size)
+    def _load_config(self, path: str):
 
-    def _load_goals_from_json(self, path: str, size: int):
-        with open(path, 'r') as f:
+        with open(path) as f:
             data = json.load(f)
 
-        goals = jnp.array(data["goals"], dtype=jnp.int32)
-        distribution = jnp.array(data["distribution"], dtype=jnp.float32)
+        size = data["size"]
+        goals = jnp.asarray(data["goals"], jnp.int32)
+        dist  = jnp.asarray(data["distribution"], jnp.float32)
+        robot_noop  = data["robot_noop"]
 
         if goals.shape[1] != size:
-            raise ValueError(f"Expected goal arrays of length {size}, but got {goals.shape[1]}.")
+            raise ValueError(f"goal length {goals.shape[1]} != size {self.size}")
+        if dist.shape[0] != goals.shape[0]:
+            raise ValueError("distribution length must match number of goals")
+        if not isinstance(robot_noop, bool):
+            raise TypeError("'robot_noop' must be a JSON boolean (true/false)")
 
-        if distribution.shape[0] != goals.shape[0]:
-            raise ValueError(f"Distribution length {distribution.shape[0]} does not match number of goals {goals.shape[0]}.")
+        return size, goals, dist / jnp.sum(dist), robot_noop
 
-        distribution = distribution / jnp.sum(distribution)  # ensure normalized
-
-        return goals, distribution
 
 
 
@@ -64,9 +64,13 @@ class LightBulbs(Environment):
     def action_space(self, env_params: EnvParams): #TODO Why do the action and observations spaces take EnvParams as inputs?
         """
         An action is a choice of index to toggle.
-        So an action is one of `self.size` many discrete options. 
+        If robot_noop == True, we will allow the robot to pass its turn, which means we have an extra action. 
+        `Noop` action is the choosing the integer `size` (which is out of bounds to be an index). 
         """
-        return gymnax.environments.spaces.Discrete(self.size)
+        if self.robot_noop: 
+            return gymnax.environments.spaces.Discrete(self.size+1)
+        else:
+            return gymnax.environments.spaces.Discrete(self.size)
 
     @property
     def default_params(self) -> EnvParams:
@@ -87,15 +91,15 @@ class LightBulbs(Environment):
         """
         Flip exactly one randomly-chosen bit where `state` and `goal` differ.
         If they already match, return `state` unchanged.
-        #TODO This is mostly chatGPT, understand each line later. 
+        #TODO
         """
-        mask = state != goal                 # boolean mask: True where mismatch
-        has_mismatch = jnp.any(mask)         # scalar bool
+        mask = state != goal         
+        has_mismatch = jnp.any(mask)
 
         def _flip(_):
             # Build a probability vector over *all* indices: 1 for mismatches, 0 otherwise.
             probs = mask.astype(jnp.float32)
-            probs /= jnp.sum(probs)          # normalise → probs sums to 1
+            probs /= jnp.sum(probs) 
             idx = random.choice(key, state.shape[0], p=probs)
             return state.at[idx].set(goal[idx])
 
@@ -148,8 +152,22 @@ class LightBulbs(Environment):
         4. Compute reward.
         """
 
-        # 1. Toggle the robot's chosen switch
-        bulbs_after_robot = state.bulbs.at[action].set(1 - state.bulbs[action])
+        # 1. robot move / no-op
+        def _noop(bulbs_and_idx):
+            bulbs, _ = bulbs_and_idx
+            return bulbs
+
+        def _toggle(bulbs_and_idx):
+            bulbs, idx = bulbs_and_idx
+            return bulbs.at[idx].set(1 - bulbs[idx])
+
+        bulbs_after_robot = jax.lax.cond(
+            action == self.size, 
+            _noop,
+            _toggle,
+            (state.bulbs, action)
+        )
+        
 
         # 2. Human responds: flip one mismatching bit
         key, subkey = jax.random.split(key)
