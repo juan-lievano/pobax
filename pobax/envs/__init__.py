@@ -150,13 +150,10 @@ def get_env(env_name: str,
         env_params = env.default_params
 
     elif env_name.startswith('lightbulbs_'):
-        # Parse the size from the name
-        size = int(env_name.split('_')[-1])
         
-        # Choose your CSV path. You could make this configurable too. lightbulbs_5_config.json
-        goal_csv_path = str(Path(ROOT_DIR) / 'pobax' / 'envs' / 'configs' / f'lightbulbs_{size}_config.json')
+        goal_csv_path = str(Path(ROOT_DIR) / 'pobax' / 'envs' / 'configs' / f'{env_name}_config.json')
 
-        env = LightBulbs(size=size, config_path=goal_csv_path)
+        env = LightBulbs(config_path=goal_csv_path)
         env_params = env.default_params
 
 
