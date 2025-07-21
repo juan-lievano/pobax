@@ -125,6 +125,10 @@ def env_step(runner_state, unused, agent: PPO, env, env_params):
     rng, _rng = jax.random.split(rng)
     value, action, log_prob, hstate = agent.act(_rng, train_state, hstate, last_obs, last_done)
 
+    #TODO Juan: tried to print last_obs and action here but it prints stuff like 
+    # Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>, Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>, Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>, Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>
+    # Which I can't interpret 
+
     # STEP ENV
     rng, _rng = jax.random.split(rng)
     rng_step = jax.random.split(_rng, hstate.shape[0])
