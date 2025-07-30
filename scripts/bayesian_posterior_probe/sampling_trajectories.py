@@ -28,7 +28,9 @@ from pobax.models import ScannedRNN
 # to check if environment and model coincide
 from pobax.models import get_gymnax_network_fn
 
-import pandas as pd
+# to save data as a file
+import numpy as np
+# import pandas as pd
 
 def print_config(args):
     print("Config loaded:")
@@ -73,10 +75,10 @@ def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulb
     done = False
     i = 0
 
-    trajectory = {'observation' : [],
-                  'hidden_rnn_state' : [],
-                  'robot_action' : [],
-                  'trajectory_id' : []} 
+    trajectory = {'observations' : [],
+                  'hidden_rnn_states' : [],
+                  'robot_actions' : [],
+                  'trajectory_id' : trajectory_id} 
     
     while not done and i < max_length:
 
@@ -98,10 +100,9 @@ def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulb
 
         # add current observation and the hidden_rnn_state and action that it produced to the trajectory
         
-        trajectory['observation'].append(observation)
-        trajectory['hidden_rnn_state'].append(hidden_rnn_state)
-        trajectory['robot_action'].append(action_int)
-        trajectory['trajectory_id'].append(trajectory_id)
+        trajectory['observations'].append(observation)
+        trajectory['hidden_rnn_states'].append(hidden_rnn_state)
+        trajectory['robot_actions'].append(action_int)
 
         # step environment 
         sub, key = jax.random.split(key)
@@ -166,6 +167,23 @@ def main(config_json : json):
     
     return trajectories
 
+def save_trajectories_to_npz(trajectories, filepath):
+    """
+    Save a list of trajectory dicts to a .npz file.
+
+    Each trajectory will be stored under a key like 'traj_0', 'traj_1', etc.
+    Each value will be a dict with NumPy arrays.
+    """
+    npz_data = {}
+
+    for i, traj in enumerate(trajectories):
+        npz_data[f"traj_{i}_observations"] = np.stack([np.array(obs) for obs in traj["observations"]])
+        npz_data[f"traj_{i}_hidden_rnn_states"] = np.stack([np.array(h) for h in traj["hidden_rnn_states"]])
+        npz_data[f"traj_{i}_robot_actions"] = np.array(traj["robot_actions"])
+        npz_data[f"traj_{i}_trajectory_id"] = np.array(traj["trajectory_id"])
+
+    np.savez_compressed(filepath, **npz_data)
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python script.py <config_filename.json> \n" \
@@ -189,8 +207,7 @@ if __name__ == "__main__":
 
     trajectories_array = main(config_json = config)
     
-    df = pd.DataFrame(trajectories_array)
-    df.to_csv('results/test.csv')
+    save_trajectories_to_npz(trajectories=trajectories_array, filepath='results/test.npz')
 
     total_time = time.time() - start_time
     print(f"\nTotal main method time: {total_time:.2f} seconds")
