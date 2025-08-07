@@ -58,7 +58,7 @@ class LightBulbs(Environment):
         An observation is a binary array of size `self.size`.
         So we will use Box with low = 0 and high = 1 and dimensions (size,).
         """
-        return gymnax.environments.spaces.Box(0, 1, (self.size,))
+        return gymnax.environments.spaces.Box(0, 1, (self.size,)) # TODO make it twice the size to include human action
         
 
     def action_space(self, env_params: EnvParams): #TODO Why do the action and observations spaces take EnvParams as inputs?
@@ -189,7 +189,7 @@ class LightBulbs(Environment):
             t=next_t
         )
 
-        return next_state, reward, done
+        return next_state, reward, done # TODO do they let us have an "info dictionary"? maybe put human action in there. 
 
     @partial(jax.jit, static_argnums=(0,))
     def step_env(self,
