@@ -37,28 +37,36 @@ def print_config(args):
     for key, value in args.items():
         print(f"{key}: {value}")
 
-def load_model_and_environment(config_json):
-    """
-    Input:
-    config_json is a json file including keys: 
-    - checkpoint_directory_path
-    - environment_config_path
+# def load_model_and_environment(config_json):
+#     """
+#     Input:
+#     config_json is a json file including keys: 
+#     - checkpoint_directory_path
+#     - environment_config_path
 
-    Asserts:
-    - Loaded model and loaded environment fit with eachother according to the configs and the get_gymnax_network_fn function
+#     Asserts:
+#     - Loaded model and loaded environment fit with eachother according to the configs and the get_gymnax_network_fn function
 
-    Returns:
-    - a loaded network of type DiscreteActorCriticRNN with the weights determined by the orbax checkpoint
-    - a LightBulbs environment 
-    """
-    # load model into discrete actor critic network 
+#     Returns:
+#     - a loaded network of type DiscreteActorCriticRNN with the weights determined by the orbax checkpoint
+#     - a LightBulbs environment 
+#     """
+#     # load model into discrete actor critic network 
 
-    ckpt_path = Path(config_json['checkpoint_directory_path']).resolve() # resolve cause it has to be absolute TODO this solution ok?
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    restored = orbax_checkpointer.restore(ckpt_path)
-    train_state = restored['final_train_state']
+#     ckpt_path = Path(config_json['checkpoint_directory_path']).resolve() # resolve cause it has to be absolute TODO this solution ok?
+#     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+#     restored = orbax_checkpointer.restore(ckpt_path)
+#     train_state = restored['final_train_state']
 
 def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulbs, size : int, model : DiscreteActorCriticRNN, weights : dict, restored_orbax_checkpoint : dict, trajectory_id, max_length = 50):
+
+    """
+    for a trajectory,
+    observations[i] = observation on time step i
+    hidden_rnn_states[i] = rnn state that augmented observation at time step i
+    robot_actions[i] = action that robot chose after seeing observations[i]
+    trajectory_id = metadata to differentiate this trajectory from others in the database
+    """
 
     # reset state and get initial observation
     sub, key = jax.random.split(key)
@@ -89,6 +97,9 @@ def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulb
 
         concatenated_obs_action_batch = concatenated_obs_action[None, None, :] # changes shape from (41,) to (1,1,41) which we need
 
+        # to the trajectory append the hidden state that augments the current observation
+        trajectory['hidden_rnn_states'].append(hidden_rnn_state)
+
         # 1x1 array of dones
         done_batch = jnp.zeros((1, 1), dtype=bool)
 
@@ -98,16 +109,15 @@ def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulb
         action = pi.sample(seed = sub)
         action_int = action[0,0]
 
-        # add current observation and the hidden_rnn_state and action that it produced to the trajectory
+        # to the trajectory append current observation and the action that the observation produced
         
         trajectory['observations'].append(observation)
-        trajectory['hidden_rnn_states'].append(hidden_rnn_state)
         trajectory['robot_actions'].append(action_int)
 
         # step environment 
         sub, key = jax.random.split(key)
 
-        observation, state, reward, done, dummy = environment.step_env(key, state, action_int, environment.default_params) # this means that we won't ever see that last observation because when it is done it won't get into the while again
+        observation, state, reward, done, dummy = environment.step_env(sub, state, action_int, environment.default_params) # this means that we won't ever see that last observation because when it is done it won't get into the while again
         # but that is probably fine
 
     return trajectory
@@ -158,7 +168,8 @@ def main(config_json : json):
     trajectory_id = 0
 
     while trajectory_id < trajectories_sample_size: # TODO add max_run_time check
-        traj = generate_single_trajectory(key = key, 
+        sub, key = jax.random.split(key)
+        traj = generate_single_trajectory(key = sub, 
                                       environment = environment,size = environment.size, model = model, 
                                       weights = weights, 
                                       trajectory_id = trajectory_id,restored_orbax_checkpoint = restored)
@@ -167,12 +178,26 @@ def main(config_json : json):
     
     return trajectories
 
-def save_trajectories_to_npz(trajectories, filepath):
-    """
-    Save a list of trajectory dicts to a .npz file.
+# def save_trajectories_to_npz(trajectories, filepath):
+#     """
+#     Save a list of trajectory dicts to a .npz file.
 
-    Each trajectory will be stored under a key like 'traj_0', 'traj_1', etc.
-    Each value will be a dict with NumPy arrays.
+#     Each trajectory will be stored under a key like 'traj_0', 'traj_1', etc.
+#     Each value will be a dict with NumPy arrays.
+#     """
+#     npz_data = {}
+
+#     for i, traj in enumerate(trajectories):
+#         npz_data[f"traj_{i}_observations"] = np.stack([np.array(obs) for obs in traj["observations"]])
+#         npz_data[f"traj_{i}_hidden_rnn_states"] = np.stack([np.array(h) for h in traj["hidden_rnn_states"]])
+#         npz_data[f"traj_{i}_robot_actions"] = np.array(traj["robot_actions"])
+#         npz_data[f"traj_{i}_trajectory_id"] = np.array(traj["trajectory_id"])
+
+#     np.savez_compressed(filepath, **npz_data)
+
+def save_trajectories_to_npz(trajectories, filepath, env_config):
+    """
+    Save a list of trajectory dicts and the config dict to a .npz file.
     """
     npz_data = {}
 
@@ -182,15 +207,21 @@ def save_trajectories_to_npz(trajectories, filepath):
         npz_data[f"traj_{i}_robot_actions"] = np.array(traj["robot_actions"])
         npz_data[f"traj_{i}_trajectory_id"] = np.array(traj["trajectory_id"])
 
+    # Save environment config as JSON string
+    config_str = json.dumps(env_config)
+    npz_data["environment_config_json"] = np.array(config_str)
+
     np.savez_compressed(filepath, **npz_data)
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python script.py <config_filename.json> \n" \
-        "<config_filename.json> should be in a directory called configs that exists in the same directory as this script.")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Sample trajectories using a trained model")
 
-    config_filename = sys.argv[1]
+    parser.add_argument("--config", required=True, type=str,
+                    help="Path to JSON config file (e.g. configs/my_config.json)")
+    args = parser.parse_args()
+
+    config_filename = config_path = Path(args.config)
+
     config_path = Path("configs") / config_filename
 
     if not config_path.exists():
@@ -206,8 +237,15 @@ if __name__ == "__main__":
     start_time = time.time()
 
     trajectories_array = main(config_json = config)
+
+
+    # crate file name to save results
+    study_name = config['study_name']
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    filename = f"{study_name}_{timestamp}.npz"
+    filepath = Path("results") / filename
     
-    save_trajectories_to_npz(trajectories=trajectories_array, filepath='results/test.npz')
+    save_trajectories_to_npz(trajectories=trajectories_array, filepath=filepath, env_config=config)
 
     total_time = time.time() - start_time
     print(f"\nTotal main method time: {total_time:.2f} seconds")
