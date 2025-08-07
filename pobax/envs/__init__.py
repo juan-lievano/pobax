@@ -5,6 +5,8 @@ import gymnax
 from jax import random
 import navix as nx
 
+import re
+
 from definitions import ROOT_DIR
 
 from pobax.envs.jax.battleship import Battleship
@@ -20,6 +22,7 @@ from pobax.envs.jax.reacher_pomdp import ReacherPOMDP
 from pobax.envs.jax.simple_chain import SimpleChain
 from pobax.envs.jax.tmaze import TMaze
 from pobax.envs.jax.lightbulbs import LightBulbs
+from pobax.envs.jax.lightbulbs2D import LightBulbs2D
 import pobax.envs.jax.navix_mazes
 from pobax.envs.wrappers.gymnax import (
     FlattenObservationWrapper,
@@ -154,6 +157,18 @@ def get_env(env_name: str,
         goal_csv_path = str(Path(ROOT_DIR) / 'pobax' / 'envs' / 'configs' / f'{env_name}_config.json')
 
         env = LightBulbs(config_path=goal_csv_path)
+        env_params = env.default_params
+
+    elif env_name.startswith('lightbulbs2d_'):
+        m = re.match(r'^lightbulbs2d_(\d+)$', env_name)
+        if not m:
+            raise ValueError(
+                f"invalid env_name '{env_name}': expected format "
+                f"'lightbulbs2d_<size>' where <size> is a positive integer, "
+                f"e.g. 'lightbulbs2d_10'"
+            )
+        size = int(m.group(1))
+        env = LightBulbs2D(size=size)
         env_params = env.default_params
 
 
