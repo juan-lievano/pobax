@@ -450,11 +450,89 @@ def make_train(args: PPOHyperparams, rand_key: jax.random.PRNGKey):
     return train
 
 
+# if __name__ == "__main__":
+#     # jax.disable_jit(True)
+#     # okay some weirdness here. NUM_ENVS needs to match with NUM_MINIBATCHES
+#     args = PPOHyperparams().parse_args()
+#     jax.config.update('jax_platform_name', args.platform)
+
+#     rng = jax.random.PRNGKey(args.seed)
+#     make_train_rng, rng = jax.random.split(rng)
+#     rngs = jax.random.split(rng, args.n_seeds)
+#     train_fn = make_train(args, make_train_rng)
+#     train_args = list(inspect.signature(train_fn).parameters.keys())
+
+#     vmaps_train = train_fn
+#     swept_args = deque()
+
+#     # we need to go backwards, since JAX returns indices
+#     # in the order in which they're vmapped.
+#     for i, arg in reversed(list(enumerate(train_args))):
+#         dims = [None] * len(train_args)
+#         dims[i] = 0
+#         vmaps_train = jax.vmap(vmaps_train, in_axes=dims)
+#         if arg == 'rng':
+#             swept_args.appendleft(rngs)
+#         else:
+#             assert hasattr(args, arg)
+#             swept_args.appendleft(getattr(args, arg))
+
+#     train_jit = jax.jit(vmaps_train)
+#     t = time()
+#     out = train_jit(*swept_args)
+#     new_t = time()
+#     total_runtime = new_t - t
+#     print('Total runtime:', total_runtime)
+
+#     # our final_eval_metric returns max_num_steps.
+#     # we can filter that down by the max episode length amongst the runs.
+#     final_eval = out['final_eval_metric']
+#     final_train_state = out['runner_state'][0]
+
+#     # # the +1 at the end is to include the done step
+#     # largest_episode = final_eval['returned_episode'].argmax(axis=-2).max() + 1
+
+#     # def get_first_n_filter(x):
+#     #     return x[..., :largest_episode, :]
+#     # out['final_eval_metric'] = jax.tree.map(get_first_n_filter, final_eval)
+
+#     final_train_state = out['runner_state'][0]
+#     if not args.save_runner_state:
+#         del out['runner_state']
+
+#     results_path = get_results_path(args, return_npy=False)  # returns a results directory
+
+#     all_results = {
+#         'argument_order': train_args,
+#         'out': out,
+#         'args': args.as_dict(),
+#         'total_runtime': total_runtime,
+#         'final_train_state': final_train_state
+#     }
+
+#     all_results = jax.tree.map(numpyify, all_results)
+
+#     # Save all results with Orbax
+#     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+#     save_args = orbax_utils.save_args_from_target(all_results)
+
+#     print(f"Saving results to {results_path}")
+#     orbax_checkpointer.save(results_path, all_results, save_args=save_args)
+#     print("Done.")
+
 if __name__ == "__main__":
+    import numpy as np
+    from pprint import pprint
+    from jax import device_get
+
     # jax.disable_jit(True)
-    # okay some weirdness here. NUM_ENVS needs to match with NUM_MINIBATCHES
     args = PPOHyperparams().parse_args()
     jax.config.update('jax_platform_name', args.platform)
+
+    # Guard: envs must be divisible by minibatches
+    assert args.num_envs % args.num_minibatches == 0, (
+        f"num_envs ({args.num_envs}) must be divisible by num_minibatches ({args.num_minibatches})"
+    )
 
     rng = jax.random.PRNGKey(args.seed)
     make_train_rng, rng = jax.random.split(rng)
@@ -465,8 +543,6 @@ if __name__ == "__main__":
     vmaps_train = train_fn
     swept_args = deque()
 
-    # we need to go backwards, since JAX returns indices
-    # in the order in which they're vmapped.
     for i, arg in reversed(list(enumerate(train_args))):
         dims = [None] * len(train_args)
         dims[i] = 0
@@ -482,40 +558,38 @@ if __name__ == "__main__":
     out = train_jit(*swept_args)
     new_t = time()
     total_runtime = new_t - t
-    print('Total runtime:', total_runtime)
 
-    # our final_eval_metric returns max_num_steps.
-    # we can filter that down by the max episode length amongst the runs.
-    final_eval = out['final_eval_metric']
-    final_train_state = out['runner_state'][0]
+    # Final eval average episodic return
+    info = out["final_eval_metric"]
+    use_discounted = getattr(args, "show_discounted", False)
+    rets = info["returned_discounted_episode_returns"] if use_discounted else info["returned_episode_returns"]
+    mask = info["returned_episode"]
+    vals = np.asarray(device_get(rets))[np.asarray(device_get(mask))]
+    final_eval_avg = float(vals.mean()) if vals.size else float("nan")
 
-    # # the +1 at the end is to include the done step
-    # largest_episode = final_eval['returned_episode'].argmax(axis=-2).max() + 1
-
-    # def get_first_n_filter(x):
-    #     return x[..., :largest_episode, :]
-    # out['final_eval_metric'] = jax.tree.map(get_first_n_filter, final_eval)
-
-    final_train_state = out['runner_state'][0]
+    final_train_state = out["runner_state"][0]
     if not args.save_runner_state:
-        del out['runner_state']
+        del out["runner_state"]
 
-    results_path = get_results_path(args, return_npy=False)  # returns a results directory
+    results_path = get_results_path(args, return_npy=False)
 
     all_results = {
-        'argument_order': train_args,
-        'out': out,
-        'args': args.as_dict(),
-        'total_runtime': total_runtime,
-        'final_train_state': final_train_state
+        "argument_order": train_args,
+        "out": out,
+        "args": args.as_dict(),
+        "total_runtime": total_runtime,
+        "final_train_state": final_train_state,
     }
-
     all_results = jax.tree.map(numpyify, all_results)
 
-    # Save all results with Orbax
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    save_args = orbax_utils.save_args_from_target(all_results)
+    print("----- SUMMARY -----")
+    print("Args used:")
+    pprint(args.as_dict())
+    print(f"Final eval avg episodic return: {final_eval_avg:.4f}")
+    print(f"Total runtime: {total_runtime:.3f}s")
 
     print(f"Saving results to {results_path}")
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    save_args = orbax_utils.save_args_from_target(all_results)
     orbax_checkpointer.save(results_path, all_results, save_args=save_args)
     print("Done.")
