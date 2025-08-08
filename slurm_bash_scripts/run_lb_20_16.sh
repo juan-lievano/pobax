@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=lightbulbs_ppo
-#SBATCH --output=logs/lightbulbs_20_16_h32_ts_4mm_%j.log
+#SBATCH --output=/nas/ucb/juanlievano/logs/lightbulbs_%j.log
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=36GB
 #SBATCH --gres=gpu:A4000:1
@@ -39,13 +39,11 @@ srun --nodes=1 --ntasks=1 --export=ALL,TMPDIR=$TMPDIR python -m pobax.algos.ppo 
     --hidden_size 32 \
     --double_critic \
     --action_concat \
-    --total_steps 4000000 \
+    --total_steps 1600000 \
     --seed 2024 \
     --lr 2.5e-03 \
     --ld_weight 0.25 \
     --lambda0 0.9 \
     --lambda1 0.5 \
     --platform gpu \
-    --study_name lightbulbs_test \
-    --debug
-
+    --study_name lightbulbs_test 
