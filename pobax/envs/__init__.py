@@ -164,11 +164,11 @@ def get_env(env_name: str,
         if not m:
             raise ValueError(
                 f"invalid env_name '{env_name}': expected format "
-                f"'lightbulbs2d_<size>' where <size> is a positive integer, "
+                f"'lightbulbs2d_<dim>' where <dim> is a positive integer, "
                 f"e.g. 'lightbulbs2d_10'"
             )
-        size = int(m.group(1))
-        env = LightBulbs2D(size=size)
+        dim = int(m.group(1))
+        env = LightBulbs2D(dim=dim)
         env_params = env.default_params
 
 

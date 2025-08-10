@@ -9,51 +9,37 @@ from jax import random
 from typing import Tuple
 
 
-def choose_goal2d(size: int, key: jax.random.key) -> jnp.ndarray:
-    """
-    Returns a 2D mask (size, size) with 1s along random horizontal, vertical,
-    and any-offset diagonals of slopes +1 or -1.
-    """
-    # Initialize empty goal
-    goal0 = jnp.zeros((size, size), dtype=jnp.int32)
-    # Coordinates for diagonal masks
+import jax, jax.numpy as jnp
+from functools import partial
+
+@partial(jax.jit, static_argnames='size')
+def choose_goal2d(size: int, key):
     i_idx, j_idx = jnp.indices((size, size))
 
-    # Generate a random permutation of the 4 line types
-    key, k_perm = random.split(key)
-    perm = random.permutation(k_perm, jnp.arange(4, dtype=jnp.int32))  # unique types
-    # Sample number of lines
-    key, k_n = random.split(key)
-    n_lines = random.randint(k_n, (), 0, 5)
+    key, k_draw, k_r, k_c, k_a, k_d = jax.random.split(key, 6)
+    draws = jax.random.bernoulli(k_draw, 0.75, (4,)) #0.75 instead of 0.5 to have 3 lines in expectaction (0.5 felt like it would be all 0s too often)
 
-    def body(i, goal):
-        lt = perm[i]
-        subk = random.fold_in(key, i)
-        if lt == 0:
-            r = random.randint(subk, (), 0, size)
-            return goal.at[r, :].set(1)
-        elif lt == 1:
-            c = random.randint(subk, (), 0, size)
-            return goal.at[:, c].set(1)
-        elif lt == 2:
-            b = random.randint(subk, (), -(size - 1), size)
-            mask = (j_idx - i_idx) == b
-            return goal.at[mask].set(1)
-        else:
-            k_val = random.randint(subk, (), 0, 2 * size)
-            mask = (i_idx + j_idx) == k_val
-            return goal.at[mask].set(1)
+    r  = jax.random.randint(k_r, (), 0, size) # to choose a random row
+    c  = jax.random.randint(k_c, (), 0, size) # to choose a random column
+    a  = jax.random.randint(k_a, (), -(size - 1), size)   # choose random anti-diagonal offset
+    d  = jax.random.randint(k_d, (), 0, 2 * size - 1)     # choose random diagonal offset
 
-    # Use fori_loop to apply each line in a JIT-friendly way
-    goal = jax.lax.fori_loop(0, n_lines, body, goal0)
-    return goal
+    masks = jnp.stack((
+        (i_idx == r),
+        (j_idx == c),
+        ((j_idx - i_idx) == a),
+        ((i_idx + j_idx) == d),
+    ), axis=0)
+
+    goal = jnp.any(masks & draws[:, None, None], axis=0)
+    return goal.astype(jnp.int32)
 
 
 @chex.dataclass
 class LightBulbs2DState:
-    bulbs: chex.Array  # current 2D state of lightbulbs
+    bulbs: chex.Array  # current 2D state of lightbulbs.
     goal: chex.Array   # 2D goal mask
-    h_action: int      # latest human action index, 0..n_actions-1 or n_actions for noop
+    h_action: int      # 1-hot 2D tensor with latest human action. 
     t: int             # step counter
 
 
@@ -63,102 +49,199 @@ class LightBulbs2D(Environment):
     Robot toggles one bulb or does noop at flat index = n_actions.
     Human flips one mismatched bulb toward the goal or noop.
     """
-    def __init__(self, size: int):
-        self.size = size
-        self.n_actions = size * size
+    def __init__(self, dim: int):
+        """
+        dim is the side length of the 2D matrix
+        """
+        self.dim = dim
 
     def observation_space(self, env_params: EnvParams):
-        dim = self.n_actions + (self.n_actions + 1)
-        return gymnax.environments.spaces.Box(0, 1, (dim,), jnp.int32)
+        """
+        Box dimension is (dim, dim, 2). 
+        That is, two layers of a dim x dim box.
+        Filtering for third coordinate == 0 we get the bulb array.
+        Filtering for third coordinate == 1 we get the human action 1-hot box.
+        """
+        dim = self.dim
+        return gymnax.environments.spaces.Box(0, 1,(dim,dim,2), jnp.int32)  
 
     def action_space(self, env_params: EnvParams):
-        # 0..n_actions-1 toggles, n_actions is noop
-        return gymnax.environments.spaces.Discrete(self.n_actions + 1)
+        """
+        dim * dim + 1 actions because we have a noop
+        """
+        dim = self.dim
+        n_actions = dim * dim + 1
+        return gymnax.environments.spaces.Discrete(n_actions)
 
     @property
     def default_params(self) -> EnvParams:
         return EnvParams(max_steps_in_episode=1000)
 
     def get_obs(self, state: LightBulbs2DState) -> jnp.ndarray:
-        bulbs_flat = state.bulbs.reshape(-1)
-        one_hot = jax.nn.one_hot(state.h_action,
-                                 self.n_actions + 1,
-                                 dtype=jnp.int32)
-        return jnp.concatenate([bulbs_flat, one_hot], axis=0)
+        """
+        """
+        # bulbs and h_action are (dim, dim) binary ararys
+        bulbs = state.bulbs.astype(jnp.int32) 
+        h_action = state.h_action.astype(jnp.int32)  # 2D one‐hot
 
-    @staticmethod
-    def human_policy(key: jax.random.key,
-                     bulbs: jnp.ndarray,
-                     goal: jnp.ndarray,
-                     n_actions: int) -> Tuple[jnp.ndarray, int]:
-        mask = bulbs != goal
-        has_mismatch = jnp.any(mask)
+        obs = jnp.stack((bulbs, h_action), axis=-1)  # (dim, dim, 2)
 
-        def flip(_):
-            key2, subk = random.split(key)
-            probs = mask.astype(jnp.float32)
-            probs = probs / jnp.sum(probs)
-            idx_flat = random.choice(subk, bulbs.size, p=probs.reshape(-1))
-            i = idx_flat // bulbs.shape[1]
-            j = idx_flat % bulbs.shape[1]
-            new_bulbs = bulbs.at[i, j].set(goal[i, j])
-            return new_bulbs, idx_flat
+        # Note : The bulbs array is given by obs[:, :, 0]),
+        # the human action one-hot is given by obs[:, :, 1])
+        return obs
 
-        new_bulbs, idx = jax.lax.cond(has_mismatch,
-                                      flip,
-                                      lambda _: (bulbs, n_actions),
-                                      operand=None)
-        return new_bulbs, idx
+    # def human_policy(key_in: jax.Array,
+    #              bulbs: jnp.ndarray,
+    #              goal: jnp.ndarray):
+        
+    #     mismatches = bulbs != goal
+    #     has_mismatch = jnp.any(mismatches)
+
+    #     dim = bulbs.shape[0]
+    #     noop_index = dim * dim  # dim*dim
+
+    #     def flip_branch(operand):
+    #         key_in, bulbs, goal, mismatches = operand
+    #         subkey, key_out = jax.random.split(key_in)
+
+    #         # adds independent noice to all of the indices with missmatches
+    #         # assings -infity to the indices with matches
+    #         # then takes a max value
+    #         # so in the end it chose a random mismatch
+    #         # this is the "gumbel-max" trick
+    #         gumbel_noise = jax.random.gumbel(subkey, bulbs.shape)
+    #         masked_scores = jnp.where(mismatches, gumbel_noise, -jnp.inf)
+
+    #         # we flatten to take the max as described in the gumbel-max trick above
+    #         flat_index = jnp.argmax(masked_scores.reshape(-1))
+
+    #         # conver flat index to 2D coords
+    #         i = flat_index // dim
+    #         j = flat_index %  dim
+
+    #         # updates bulbs array
+
+    #         bulbs_updated = bulbs_updated = bulbs.at[i, j].set(bulbs[i, j] ^ 1) # xor (^) with "1" will simply toggle the value
+
+    #         return bulbs_updated, flat_index, key_out
+
+    #     def noop_branch(operand):
+    #         key_in, bulbs, goal, mismatches = operand
+    #         return bulbs, noop_index, key_in
+
+    #     bulbs_next, chosen_index, key_out = jax.lax.cond(
+    #         has_mismatch,
+    #         flip_branch,
+    #         noop_branch,
+    #         operand=(key_in, bulbs, goal, mismatches),
+    #     )
+    #     return bulbs_next, chosen_index, key_out
+
 
     @partial(jax.jit, static_argnums=(0,))
     def reset_env(self,
-                  key: jax.random.key,
-                  params: EnvParams) -> Tuple[jnp.ndarray, LightBulbs2DState]:
-        key, subkey = random.split(key)
-        bulbs = random.bernoulli(subkey,
-                                 p=0.5,
-                                 shape=(self.size, self.size)).astype(jnp.int32)
-        # sample goal (no key returned)
-        goal = choose_goal2d(self.size, subkey)
-        state = LightBulbs2DState(bulbs=bulbs,
-                                   goal=goal,
-                                   h_action=self.n_actions,
-                                   t=0)
-        return self.get_obs(state), state
+                key: jax.Array,
+                params: EnvParams):
+        dim = self.dim
 
-    def transition(self,
-                   key: jax.random.key,
-                   state: LightBulbs2DState,
-                   action: int) -> Tuple[LightBulbs2DState, jnp.ndarray, bool]:
-        def toggle_fn(args):
-            b, idx = args
-            i, j = divmod(idx, self.size)
-            return b.at[i, j].set(1 - b[i, j])
+        # Split keys: one for bulbs, one for goal
+        key, k_bulbs, k_goal = random.split(key, 3)
 
-        bulbs_after = jax.lax.cond(action == self.n_actions,
-                                    lambda args: args[0],
-                                    toggle_fn,
-                                    (state.bulbs, action))
-        key, subkey = random.split(key)
-        bulbs_after_human, h_idx = self.human_policy(subkey,
-                                                     bulbs_after,
-                                                     state.goal,
-                                                     self.n_actions)
-        done = jnp.all(bulbs_after_human == state.goal)
-        reward = jnp.where(done, 0, -1)
-        next_state = LightBulbs2DState(bulbs=bulbs_after_human,
-                                       goal=state.goal,
-                                       h_action=int(h_idx),
-                                       t=state.t + 1)
-        return next_state, reward, done
+        # Random initial bulbs (0/1) on a dim x dim grid
+        bulbs = random.bernoulli(k_bulbs, p=0.5, shape=(dim, dim)).astype(jnp.int32)
+
+        # Sample a goal mask with your JIT-able generator
+        goal = choose_goal2d(dim, k_goal).astype(jnp.int32)
+
+        # No previous human action at reset → 2D zero plane
+        h_action = jnp.zeros((dim, dim), dtype=jnp.int32)
+
+        state = LightBulbs2DState(
+            bulbs=bulbs,
+            goal=goal,
+            h_action=h_action,
+            t=0
+        )
+
+        # get_obs should stack (bulbs, h_action) along channel axis → (dim, dim, 2)
+        obs = self.get_obs(state)
+        return obs, state
 
     @partial(jax.jit, static_argnums=(0,))
     def step_env(self,
-                 key: jax.random.key,
-                 state: LightBulbs2DState,
-                 action: int,
-                 params: EnvParams):
-        key, subkey = random.split(key)
-        next_state, reward, done = self.transition(subkey, state, action)
+                key: jax.Array,
+                state: LightBulbs2DState,
+                action: jnp.int32,
+                params: EnvParams):
+        
+        dim  = self.dim
+        noop = dim * dim
+
+        key, k_human = random.split(key)
+
+        # robot toggle function (this is only called if robot didn't noop)
+        def toggle_fn(args):
+            bulbs, idx = args
+            i, j = divmod(idx, dim)
+            return bulbs.at[i, j].set(bulbs[i, j] ^ 1)
+
+        # bulbs after robot toggle
+        bulbs_after = jax.lax.cond(
+            action == noop,
+            lambda args: args[0],
+            toggle_fn,
+            operand=(state.bulbs, action),
+        )
+
+        # human toggle
+        mismatches   = bulbs_after != state.goal
+        has_mismatch = jnp.any(mismatches)
+
+        def human_flip(_): # takes a dummy input because jax.lax expects to be able to feed an input
+            """
+            The "gumbel-max" trick is used to select a random index to fix.
+            It goes like this:
+            1. adds independent noice to all of the indices with missmatches
+            2. assings -infity to the indices with matches
+            3. then takes a max value (in the flattened array)
+            4. so in the end it chose a random mismatch
+            """
+            g = random.gumbel(k_human, bulbs_after.shape) 
+            scores = jnp.where(mismatches, g, -jnp.inf)
+            h_flat = jnp.argmax(scores)                     # flat index
+            i, j   = jnp.unravel_index(h_flat, (dim, dim))
+            bulbs_h = bulbs_after.at[i, j].set(bulbs_after[i, j] ^ 1)
+            return bulbs_h, h_flat
+
+        bulbs_after_h, h_flat = jax.lax.cond(
+            has_mismatch,
+            human_flip,
+            lambda _: (bulbs_after, noop),
+            operand=None,
+        )
+
+        # 3) Build human 2D one-hot (all zeros if noop)
+        def build_one_hot(_):
+            i, j = jnp.unravel_index(h_flat, (dim, dim))
+            return jnp.zeros((dim, dim), jnp.int32).at[i, j].set(1)
+
+        h_action_plane = jax.lax.cond(
+            h_flat == noop,
+            lambda _: jnp.zeros((dim, dim), jnp.int32),
+            build_one_hot,
+            operand=None,
+        )
+
+        # 4) Done / reward
+        done   = jnp.all(bulbs_after_h == state.goal)
+        reward = jnp.where(done, 0, -1)
+
+        next_state = LightBulbs2DState(
+            bulbs=bulbs_after_h,
+            goal=state.goal,
+            h_action=h_action_plane,
+            t=state.t + 1,
+        )
+
         obs = self.get_obs(next_state)
         return obs, next_state, reward, done, {}
