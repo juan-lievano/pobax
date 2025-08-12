@@ -376,20 +376,28 @@ def make_train(args: PPOHyperparams, rand_key: jax.random.PRNGKey):
             metric = jax.tree.map(steps_filter, metric)
 
             rng = update_state[-1]
+            
             if args.debug:
-
                 def callback(info):
                     timesteps = (
-                            info["timestep"][info["returned_episode"]] * args.num_envs
+                        info["timestep"][info["returned_episode"]] * args.num_envs
                     )
-                    if args.show_discounted:
-                        show_str = "avg discounted return"
-                        avg_return_values = jnp.mean(info["returned_discounted_episode_returns"][info["returned_episode"]])
-                    else:
-                        show_str = "avg episodic return"
-                        avg_return_values = jnp.mean(info["returned_episode_returns"][info["returned_episode"]])
+                    if len(timesteps) == 0:
+                        return
 
-                    if len(timesteps) > 0:
+                    # Only print near multiples of 500_000 timesteps
+                    if timesteps[-1] % 500_000 < args.num_envs:
+                        if args.show_discounted:
+                            show_str = "avg discounted return"
+                            avg_return_values = jnp.mean(
+                                info["returned_discounted_episode_returns"][info["returned_episode"]]
+                            )
+                        else:
+                            show_str = "avg episodic return"
+                            avg_return_values = jnp.mean(
+                                info["returned_episode_returns"][info["returned_episode"]]
+                            )
+
                         print(
                             f"timesteps={timesteps[0]} - {timesteps[-1]}, {show_str}={avg_return_values:.2f}"
                         )
