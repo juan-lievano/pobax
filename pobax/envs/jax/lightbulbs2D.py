@@ -150,10 +150,10 @@ class LightBulbs2D(Environment):
         # Random initial bulbs (0/1) on a dim x dim grid
         bulbs = random.bernoulli(k_bulbs, p=0.5, shape=(dim, dim)).astype(jnp.int32)
 
-        # Sample a goal mask with your JIT-able generator
+        # Sample a goal
         goal = choose_goal2d(dim, k_goal).astype(jnp.int32)
 
-        # No previous human action at reset → 2D zero plane
+        # No previous human action at reset (so 2D zeros plane)
         h_action = jnp.zeros((dim, dim), dtype=jnp.int32)
 
         state = LightBulbs2DState(
