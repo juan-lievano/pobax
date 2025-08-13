@@ -1,10 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=lightbulbs_ppo
+#SBATCH --job-name=lightbulbs2d_ppo_big
 #SBATCH --output=/nas/ucb/juanlievano/pobax/logs/lightbulbs2d_%j.log
-#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=36GB
+#SBATCH --gres=gpu:A100-SXM4-80GB:1
 #SBATCH --time=24:00:00
+#SBATCH --nodelist=sac.ist.berkeley.edu
 
 set -eo pipefail
 
@@ -12,9 +13,15 @@ echo "Running on host: $(hostname)"
 
 export MAMBA_ROOT_PREFIX=/nas/ucb/juanlievano/miniforge3
 export PATH=$MAMBA_ROOT_PREFIX/bin:$PATH
-export TMPDIR=/nas/ucb/juanlievano/pip_tmp
 
-# Temporarily allow unset vars to avoid conda deactivate crash
+# Per-job TMP so runs don't collide
+export TMPDIR=/nas/ucb/juanlievano/pip_tmp/${SLURM_JOB_ID}
+mkdir -p "$TMPDIR"
+
+# JAX GPU memory behavior
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=.90
+
 set +u
 eval "$($MAMBA_ROOT_PREFIX/bin/mamba shell hook --shell bash)"
 mamba activate pobax310
@@ -25,37 +32,24 @@ cd /nas/ucb/juanlievano/pobax
 echo "JAX devices:"
 python -c "import jax; print(jax.devices()); print('Backend:', jax.default_backend())"
 
-# fail-fast + compile-cache
-
-# sanity check: crash instantly if driver/runtime mismatched on this node
-python - <<'PY'
-import jax, jax.numpy as jnp, jaxlib, jaxlib.version as v
-print("jax", jax.__version__, "jaxlib", jaxlib.__version__)
-print("cuda build:", getattr(v,'cuda',None) or getattr(v,'__cuda_version__',None))
-print("devices:", jax.devices())
-print("GPU op:", jnp.ones(1).block_until_ready())
-PY
-
-# actual run
-
+# Bigger rollout (64x256=16384), more epochs, larger net, safer LR, higher entropy
+# Unique study_name per job to avoid path collisions
 srun --nodes=1 --ntasks=1 --export=ALL,TMPDIR=$TMPDIR python -m pobax.algos.ppo \
-    --env lightbulbs2d_6 \
+    --env lightbulbs2d_8 \
     --platform gpu \
     --seed 2024 \
-    --study_name lightbulbs2d \
-    --hidden_size 64 \
+    --study_name lightbulbs2d_big \
+    --hidden_size 256 \
     --double_critic \
     --action_concat \
-    --lr 2.5e-4 \
+    --lr 3e-4 \
     --entropy_coeff 0.05 \
     --ld_weight 0.25 \
-    --lambda0 0.9 \
-    --lambda1 0.5 \
     --n_seeds 1 \
     --num_envs 64 \
-    --num_steps 128 \
+    --num_steps 256 \
     --num_minibatches 32 \
     --update_epochs 10 \
     --num_eval_envs 0 \
     --debug \
-    --total_steps 64000000
+    --total_steps 640000000
