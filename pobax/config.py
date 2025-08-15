@@ -79,6 +79,22 @@ class PPOHyperparams(Tap):
         self.alpha = jnp.array(self.alpha)
         self.ld_weight = jnp.array(self.ld_weight)
 
+class GDPPOHyperparams(PPOHyperparams):
+    cumulant_loss_weight: list[float] = [0.5]
+    cumulant_map_size: int = 32
+    cumulant_type: str = None  # None | hs | rew | obs
+    cumulant_transform: str = None  # None | random_proj
+    cumulant_diff: bool = False
+    scale_cumulant: bool = False
+    add_reward_to_cumulant: bool = False
+    gamma_type: str = 'fixed'  # fixed | nn_gamma_sigmoid
+    gamma_max: float = 1.
+    gamma_min: float = 0.75
+    action_concat: bool = True
+
+    def process_args(self) -> None:
+        if isinstance(self.cumulant_type, str) and self.cumulant_type.lower() == 'none':
+            self.cumulant_type = None
 
 class DQNHyperparams(Tap):
     env: str = 'CartPole-v1'

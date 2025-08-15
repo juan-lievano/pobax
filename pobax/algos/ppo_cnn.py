@@ -21,7 +21,8 @@ import orbax.checkpoint
 from pobax.config import PPOHyperparams
 from pobax.envs import get_env
 from pobax.envs.wrappers.gymnax import LogEnvState
-from pobax.models import get_gymnax_network_fn, ScannedRNN
+from pobax.models import get_gymnax_network_fn, ScannedRNN # TODO I think i have to make a new object that instead to replace ScannedRNN that works as the conjuction of an RNN and a CNN.. 
+# Actually no, there is ImageDiscreteActorCriticRNN in pobax.models.discrete
 from pobax.utils.file_system import get_results_path, numpyify
 
 
@@ -43,7 +44,8 @@ class PPO:
                  vf_coeff: float = 0.,
                  entropy_coeff: float = 0.01,
                  clip_eps: float = 0.2):
-        self.network = network
+        self.network = network # TODO will there be two networks now? Or will this "network" contain a composition of a CNN and an RNN?
+        # TODO Actually (see comment in ppo.act below) I think this network is already NOT only an RRN, because it outputs an action distribution and the RNN only outputs a state representation.
         self.double_critic = double_critic
         self.ld_weight = ld_weight
         self.alpha = alpha
@@ -54,47 +56,55 @@ class PPO:
         self.loss = jax.jit(self.loss)
 
     def act(self, rng: chex.PRNGKey,
-            train_state: flax.training.train_state.TrainState,
+            train_state: flax.training.train_state.TrainState, # network parameters and optimizer state probably
             hidden_state: chex.Array,
             obs: chex.Array, done: chex.Array):
 
         # SELECT ACTION
-        ac_in = (obs[np.newaxis, :], done[np.newaxis, :])
-        hstate, pi, value = self.network.apply(train_state.params, hidden_state, ac_in)
+        ac_in = (obs[np.newaxis, :], done[np.newaxis, :]) # probably adds time dimension to fit what the RNN expects, even if T = 1 in this case (i think)
+        hstate, pi, value = self.network.apply(train_state.params, hidden_state, ac_in) # returns new hidden state and action distribution (pi). #TODO Maybe this is a place where the CNN would go?
+        # TODO Actually "self.network" here can't be an RNN because it is outputting an action distribution, 
         action = pi.sample(seed=rng)
-        log_prob = pi.log_prob(action)
+        log_prob = pi.log_prob(action) # this is used later for a PPO thing ("importance sampling ratio")
         value, action, log_prob = (
-            value.squeeze(0),
+            value.squeeze(0), 
             action.squeeze(0),
             log_prob.squeeze(0),
-        )
-        return value, action, log_prob, hstate
+        ) # removes the extra dimension that was added when we defined ac_in 
+        return value, action, log_prob, hstate # value is the predicted state value btw
 
-    def loss(self, params, init_hstate, traj_batch, gae, targets):
+    def loss(self, params, init_hstate, traj_batch, gae, targets): # the gradient update is calculated from a batch of trajectories because from just one it would be too noisy (also this is more parallel i guess)
+        # gae is the advantages and PPO uses advantage as loss 
+        # i think the targets are the "ground truth" (or an estimate of that) of what the value seems to be given the rewards, the critic's loss function is how far it was from these targets
+
         # RERUN NETWORK
         _, pi, value = self.network.apply(
             params, init_hstate[0], (traj_batch.obs, traj_batch.done)
-        )
-        log_prob = pi.log_prob(traj_batch.action)
+        ) # TODO would we rerun a CNN thing here as well?
 
-        # CALCULATE VALUE LOSS
+        log_prob = pi.log_prob(traj_batch.action) # that batch was done under a different pi (we know this cause it has been already collected) and now we are calculating the log_prob of those actions under the new pi. 
+
+        # Value loss
         value_pred_clipped = traj_batch.value + (
                 value - traj_batch.value
-        ).clip(-self.clip_eps, self.clip_eps)
+        ).clip(-self.clip_eps, self.clip_eps) # PPO clips which keeps thing more stable I think. 
         value_losses = jnp.square(value - targets)
         value_losses_clipped = jnp.square(value_pred_clipped - targets)
         value_loss = (
             jnp.maximum(value_losses, value_losses_clipped).mean()
-        )
+        ) # also standard PPO apparently, probably not important to understand 100% 
+
         # Lambda discrepancy loss
         if self.double_critic:
             value_loss = self.ld_weight * (jnp.square(value[..., 0] - value[..., 1])).mean() + \
                          (1 - self.ld_weight) * value_loss
 
-        # CALCULATE ACTOR LOSS
+        # Actor loss
         ratio = jnp.exp(log_prob - traj_batch.log_prob)
 
         # which advantage do we use to update our policy?
+        # TODO according to the LD figure it seems like it should just use the TD advantage? 
+
         if self.double_critic:
             gae = (self.alpha * gae[..., 0] +
                    (1 - self.alpha) * gae[..., 1])
@@ -121,13 +131,12 @@ class PPO:
 
 
 def env_step(runner_state, unused, agent: PPO, env, env_params):
+    # runner_state: things you need to keep the run running (train_state, env_state, obsv, done, hstate, rng)
+    # Note that runner state has no action the action is pulled out here in this function. (we call agent.act). 
+    # agent: a PPO object has a network, an act function and a loss function, and some parameters (define on top of this file). 
     train_state, env_state, last_obs, last_done, hstate, rng = runner_state
     rng, _rng = jax.random.split(rng)
     value, action, log_prob, hstate = agent.act(_rng, train_state, hstate, last_obs, last_done)
-
-    #TODO Juan: tried to print last_obs and action here but it prints stuff like 
-    # Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>, Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>, Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>, Traced<ShapedArray(float32[41])>with<DynamicJaxprTrace>
-    # Which I can't interpret 
 
     # STEP ENV
     rng, _rng = jax.random.split(rng)
@@ -135,12 +144,14 @@ def env_step(runner_state, unused, agent: PPO, env, env_params):
     obsv, env_state, reward, done, info = env.step(rng_step, env_state, action, env_params)
     transition = Transition(
         last_done, action, value, reward, log_prob, last_obs, info
-    )
-    runner_state = (train_state, env_state, obsv, done, hstate, rng)
+    ) # Transition is just a named tuple for clarity. 
+
+    runner_state = (train_state, env_state, obsv, done, hstate, rng) 
     return runner_state, transition
 
 
-def calculate_gae(traj_batch, last_val, last_done, gae_lambda, gamma):
+def calculate_gae(traj_batch, last_val, last_done, gae_lambda, gamma): #gae means Generalized Advantage Estimation. 
+    # if it is simply a GAE it should calculate advantages but not in an MC way nor a TD way but something in between. But I didn't go line by line here. 
     def _get_advantages(carry, transition):
         gae, next_value, gae_lambda = carry
         done, value, reward = transition.done, transition.value, transition.reward
@@ -183,6 +194,8 @@ def make_train(args: PPOHyperparams, rand_key: jax.random.PRNGKey):
     memoryless = args.memoryless
 
     network_fn, action_size = get_gymnax_network_fn(env, env_params, memoryless=memoryless)
+
+    print(network_fn)
 
     network = network_fn(action_size,
                          double_critic=double_critic,

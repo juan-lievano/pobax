@@ -80,9 +80,10 @@ class SmallImageCNN(nn.Module):
         if num_dims == 2 and x.shape[-2] == x.shape[-1] and x.shape[-2] == 10:
             out1 = nn.Conv(features=self.hidden_size, kernel_size=5, strides=1, padding=0)(x)
             out1 = nn.relu(out1)
-            out2 = nn.Conv(features=self.hidden_size, kernel_size=4, strides=1, padding=0)(out1)
-            out2 = nn.relu(out2)
-            conv_out = nn.Conv(features=self.hidden_size, kernel_size=3, strides=1, padding=0)(out2)
+            conv_out = nn.Conv(...)(out1)
+            # out2 = nn.Conv(features=self.hidden_size, kernel_size=4, strides=1, padding=0)(out1)
+            # out2 = nn.relu(out2)
+            # conv_out = nn.Conv(features=self.hidden_size, kernel_size=3, strides=1, padding=0)(out2)
 
         # 5x5
         elif x.shape[-3] == x.shape[-2] and x.shape[-3] == 5:
