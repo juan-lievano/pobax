@@ -23,6 +23,8 @@ from pobax.envs.jax.simple_chain import SimpleChain
 from pobax.envs.jax.tmaze import TMaze
 from pobax.envs.jax.lightbulbs import LightBulbs
 from pobax.envs.jax.lightbulbs2D import LightBulbs2D
+from pobax.envs.jax.easylightbulbs2D import EasyLightBulbs2D
+
 import pobax.envs.jax.navix_mazes
 from pobax.envs.wrappers.gymnax import (
     FlattenObservationWrapper,
@@ -171,6 +173,17 @@ def get_env(env_name: str,
         env = LightBulbs2D(dim=dim)
         env_params = env.default_params
 
+    elif env_name.startswith('easylightbulbs2d_'):
+        m = re.match(r'^easylightbulbs2d_(\d+)$', env_name)
+        if not m:
+            raise ValueError(
+                f"invalid env_name '{env_name}': expected format "
+                f"'lightbulbs2d_<dim>' where <dim> is a positive integer, "
+                f"e.g. 'lightbulbs2d_10'"
+            )
+        dim = int(m.group(1))
+        env = EasyLightBulbs2D(dim=dim)
+        env_params = env.default_params
 
     elif env_name in pomdp_files:
         env = load_pomdp(env_name, fully_observable=fo_pomdp)
