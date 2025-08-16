@@ -76,8 +76,17 @@ class SmallImageCNN(nn.Module):
     @nn.compact
     def __call__(self, x):
         num_dims = len(x.shape) - 2
+
+        # 8x8 and 2 channels for lightbulbs2D (second channel is human 1-hot plane)
+        if x.shape[-3] == x.shape[-2] == 8 and x.shape[-1] == 2:
+            out1 = nn.Conv(features=16, kernel_size=(3, 3), strides=1, padding="VALID")(x)
+            out1 = nn.relu(out1)
+            out2 = nn.Conv(features=32, kernel_size=(3, 3), strides=1, padding="VALID")(out1)
+            # out2 = nn.relu(out2) Cam suggested to not have this relu
+            conv_out = out2 
+
         # 10x10 2 dimensions
-        if num_dims == 2 and x.shape[-2] == x.shape[-1] and x.shape[-2] == 10:
+        elif num_dims == 2 and x.shape[-2] == x.shape[-1] and x.shape[-2] == 10:
             out1 = nn.Conv(features=self.hidden_size, kernel_size=5, strides=1, padding=0)(x)
             out1 = nn.relu(out1)
             conv_out = nn.Conv(...)(out1)

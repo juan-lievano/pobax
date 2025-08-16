@@ -134,9 +134,9 @@ class ImageDiscreteActorCriticRNN(nn.Module):
         obs, dones = x
 
         # if obs.shape[-2] >= 64:
-        embedding = FullImageCNN(hidden_size=self.hidden_size)(obs)
+        # embedding = FullImageCNN(hidden_size=self.hidden_size)(obs)
         # else:
-        #     embedding = SmallImageCNN(hidden_size=self.hidden_size)(obs)
+        embedding = SmallImageCNN(hidden_size=self.hidden_size)(obs)
         embedding = nn.relu(embedding)
 
         rnn_in = (embedding, dones)
