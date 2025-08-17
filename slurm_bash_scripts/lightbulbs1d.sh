@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=lightbulbs_ppo
+#SBATCH --job-name=1dlb
 #SBATCH --output=/nas/ucb/juanlievano/pobax/logs/lightbulbs1d_%j.log
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256GB
 #SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 
 set -eo pipefail
 
@@ -41,4 +41,4 @@ srun --nodes=1 --ntasks=1 --export=ALL,TMPDIR=$TMPDIR python -m pobax.algos.ppo 
   --lambda0 0.9 \
   --lambda1 0.5 \
   --platform gpu \
-  --study_name lightbulbs
+  --study_name lightbulbs1d
