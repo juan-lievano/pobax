@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=lightbulbs_ppo
+#SBATCH --job-name=lb2D_sweep
 #SBATCH --output=/nas/ucb/juanlievano/pobax/logs/lightbulbs2d_%j.log
-#SBATCH --gres=gpu:A4000:1
+#SBATCH --gres=gpu:A100:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=36GB
-#SBATCH --time=24:00:00
+#SBATCH --mem=256GB
+#SBATCH --time=48:00:00
 
 set -eo pipefail
 
@@ -43,15 +43,15 @@ srun --nodes=1 --ntasks=1 --export=ALL,TMPDIR=$TMPDIR python -m pobax.algos.ppo 
     --platform gpu \
     --seed 2024 \
     --study_name lightbulbs2d \
-    --hidden_size 1024 \
+    --hidden_size 512 \
     --double_critic \
     --lr 2.5e-4 \
-    --entropy_coeff 0.05 \
+    --entropy_coeff 0.01 \
     --ld_weight 0.25 \
     --lambda0 0.9 \
     --lambda1 0.5 \
     --n_seeds 1 \
-    --num_envs 64 \
+    --num_envs 128 \
     --num_steps 128 \
     --num_minibatches 64 \
     --update_epochs 20 \
