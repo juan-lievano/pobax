@@ -159,7 +159,7 @@ def main(trajectories_filepath):
     output_filename = f"{study_name}_{timestamp}.csv"
     output_path = output_dir / output_filename
 
-    df.to_csv(output_path)
+    df.to_csv(output_path, index=False)
     print(f'results saved to {output_path}')
     
 def load_trajectories_and_env_config_from_npz(trajectories_filepath):

@@ -58,7 +58,7 @@ def print_config(args):
 #     restored = orbax_checkpointer.restore(ckpt_path)
 #     train_state = restored['final_train_state']
 
-def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulbs, size : int, model : DiscreteActorCriticRNN, weights : dict, restored_orbax_checkpoint : dict, trajectory_id, max_length = 50):
+def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulbs, size : int, model : DiscreteActorCriticRNN, weights : dict, restored_orbax_checkpoint : dict, trajectory_id, max_length = 0):
 
     """
     for a trajectory,
@@ -120,6 +120,8 @@ def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulb
         observation, state, reward, done, dummy = environment.step_env(sub, state, action_int, environment.default_params) # this means that we won't ever see that last observation because when it is done it won't get into the while again
         # but that is probably fine
 
+        i+=1
+
     return trajectory
 
 
@@ -177,23 +179,6 @@ def main(config_json : json):
         trajectory_id += 1
     
     return trajectories
-
-# def save_trajectories_to_npz(trajectories, filepath):
-#     """
-#     Save a list of trajectory dicts to a .npz file.
-
-#     Each trajectory will be stored under a key like 'traj_0', 'traj_1', etc.
-#     Each value will be a dict with NumPy arrays.
-#     """
-#     npz_data = {}
-
-#     for i, traj in enumerate(trajectories):
-#         npz_data[f"traj_{i}_observations"] = np.stack([np.array(obs) for obs in traj["observations"]])
-#         npz_data[f"traj_{i}_hidden_rnn_states"] = np.stack([np.array(h) for h in traj["hidden_rnn_states"]])
-#         npz_data[f"traj_{i}_robot_actions"] = np.array(traj["robot_actions"])
-#         npz_data[f"traj_{i}_trajectory_id"] = np.array(traj["trajectory_id"])
-
-#     np.savez_compressed(filepath, **npz_data)
 
 def save_trajectories_to_npz(trajectories, filepath, env_config):
     """
