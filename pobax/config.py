@@ -29,7 +29,7 @@ class PPOHyperparams(Tap):
     # env: str = 'Hopper-P-v0'
     # env: str = 'MemoryChain-bsuite'
     num_envs: int = 4
-    default_max_steps_in_episode: int = 1000
+    default_max_steps_in_episode: int = 100 # TODO this used to be 1000 but I changed it to 100 for lightbulbs 2D, do this in a non-hardcoded way. 
     gamma: float = 0.99  # will be replaced if env has gamma property.
 
     num_steps: int = 128

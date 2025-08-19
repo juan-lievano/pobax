@@ -179,6 +179,8 @@ def make_train(args: PPOHyperparams, rand_key: jax.random.PRNGKey):
 
     assert hasattr(env_params, 'max_steps_in_episode')
 
+    # env_params = replace(env_params, max_steps_in_episode=args.default_max_steps_in_episode)
+
     double_critic = args.double_critic
     memoryless = args.memoryless
 
@@ -571,8 +573,8 @@ if __name__ == "__main__":
     info = out["final_eval_metric"]
     use_discounted = getattr(args, "show_discounted", False)
     rets = info["returned_discounted_episode_returns"] if use_discounted else info["returned_episode_returns"]
-    mask = info["returned_episode"]
-    vals = np.asarray(device_get(rets))[np.asarray(device_get(mask))]
+    mask = info["returned_episode"] # i think not every episode has finished running when the time steps are used up, and this mask shows which episodes did finish.
+    vals = np.asarray(device_get(rets))[np.asarray(device_get(mask))] # and we only care about the return of the episodes that we did not interrupt (doesn't that give a biased sample?)
     final_eval_avg = float(vals.mean()) if vals.size else float("nan")
 
     final_train_state = out["runner_state"][0]
