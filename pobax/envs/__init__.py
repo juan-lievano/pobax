@@ -178,11 +178,15 @@ def get_env(env_name: str,
         if not m:
             raise ValueError(
                 f"invalid env_name '{env_name}': expected format "
-                f"'lightbulbs2d_<dim>' where <dim> is a positive integer, "
-                f"e.g. 'lightbulbs2d_10'"
+                f"'easylightbulbs2d_<dim>' where <dim> is a positive integer, "
+                f"e.g. 'easylightbulbs2d_10'"
             )
         dim = int(m.group(1))
         env = EasyLightBulbs2D(dim=dim)
+        env_params = env.default_params
+
+    elif env_name == 'compass_world':
+        env = CompassWorld(size=8, random_start=True)
         env_params = env.default_params
 
     elif env_name in pomdp_files:
