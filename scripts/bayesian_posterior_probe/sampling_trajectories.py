@@ -32,6 +32,8 @@ from pobax.models import get_gymnax_network_fn
 import numpy as np
 # import pandas as pd
 
+import os
+
 def print_config(args):
     print("Config loaded:")
     for key, value in args.items():
@@ -58,7 +60,7 @@ def print_config(args):
 #     restored = orbax_checkpointer.restore(ckpt_path)
 #     train_state = restored['final_train_state']
 
-def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulbs, size : int, model : DiscreteActorCriticRNN, weights : dict, restored_orbax_checkpoint : dict, trajectory_id, max_length = 0):
+def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulbs, size : int, model : DiscreteActorCriticRNN, weights : dict, restored_orbax_checkpoint : dict, trajectory_id, max_length = 100):
 
     """
     for a trajectory,
@@ -92,7 +94,8 @@ def generate_single_trajectory(key : jax.random.PRNGKey, environment : LightBulb
 
         # format prev_action_int as a vector
         prev_action_vector = jnp.zeros(size + 1).astype(dtype='int32')
-        prev_action_vector.at[action_int].set(1) # this will always be noop
+        prev_action_vector = prev_action_vector.at[action_int].set(1) # this will always be noop # (wait why did i say this would always be noop?)
+
         concatenated_obs_action = jnp.concatenate([observation, prev_action_vector], axis = -1)
 
         concatenated_obs_action_batch = concatenated_obs_action[None, None, :] # changes shape from (41,) to (1,1,41) which we need
@@ -205,10 +208,11 @@ if __name__ == "__main__":
                     help="Path to JSON config file (e.g. configs/my_config.json)")
     args = parser.parse_args()
 
-    config_filename = config_path = Path(args.config)
+    config_filename = Path(args.config)
 
     config_path = Path("configs") / config_filename
 
+    cwd = os.getcwd()
     if not config_path.exists():
         print(f"Config file not found: {config_path}")
         sys.exit(1)
@@ -234,17 +238,4 @@ if __name__ == "__main__":
 
     total_time = time.time() - start_time
     print(f"\nTotal main method time: {total_time:.2f} seconds")
-
-
-
-
-
-
-
-
-
-
-
-
-
 
