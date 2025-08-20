@@ -1,8 +1,8 @@
 {
   "checkpoint_directory_path": "../../results/lightbulbs/lightbulbs_40_16_seed(2024)_time(20250816-215031)_c39f14f888b87e46f5cd43cb1b9cf111",
   "max_run_time_minutes": 10,
-  "trajectories_sample_size": 100,
+  "trajectories_sample_size": 50000,
   "environment_config_path": "../../pobax/envs/configs/lightbulbs_40_16_config.json",
   "random_seed": 2024,
-  "study_name": "40_lightbulbs_16_goals_100_trajectories_time_"
+  "study_name": "40_lightbulbs_16_goals_50k_trajectories"
 }
