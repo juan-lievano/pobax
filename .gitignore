@@ -165,3 +165,4 @@ scripts/videos
 scripts/bayesian_posterior_probe/supervised_learning_data/*.csv
 .vscode/
 .DS_Store
+*.DS_Store
