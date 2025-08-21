@@ -40,13 +40,13 @@ class CompassWorld(Environment):
 
     def _obs_from_state(self, pos: jnp.ndarray, dir_: jnp.ndarray) -> jnp.ndarray:
         # one-hot over [N-wall, E-wall, S-wall, blue(W), green(W@(1,1))]
-        n = (dir_ == 0) & (pos[0] == 1)
+        n = (dir_ == 0) & (pos[0] == 1) # pos[0] is the row, pos[1] is the column, so this makes sense. (althogh it means the coordinates are (y,x) which is sort of annoying)
         e = (dir_ == 1) & (pos[1] == self.size - 2)
         s = (dir_ == 2) & (pos[0] == self.size - 2)
-        w_border = (dir_ == 3) & (pos[1] == 1)
-        g = w_border & (pos[0] == 1)
-        b = w_border & (pos[0] != 1)
-        return jnp.array([n, e, s, b, g], dtype=jnp.uint8)
+        w_border = (dir_ == 3) & (pos[1] == 1) # column with index 1, and facing west
+        g = w_border & (pos[0] == self._goal_pos[0]) # in west border and in the goal's row
+        w = w_border & (pos[0] != self._goal_pos[0]) # in west border and not in the goal's row
+        return jnp.array([n, e, s, w, g], dtype=jnp.uint8)
 
     def _done(self, pos: jnp.ndarray, dir_: jnp.ndarray) -> jnp.ndarray:
         return jnp.logical_and(jnp.all(pos == self._goal_pos), dir_ == self._goal_dir)
