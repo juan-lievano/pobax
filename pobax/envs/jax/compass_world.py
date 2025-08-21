@@ -23,8 +23,10 @@ class CompassWorld(Environment):
         self._dir_map = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]], dtype=jnp.int32)
         self._state_min = jnp.array([1, 1], dtype=jnp.int32)
         self._state_max = jnp.array([self.size - 2, self.size - 2], dtype=jnp.int32)
-        self._goal_pos = jnp.array([1, 1], dtype=jnp.int32)
-        self._goal_dir = jnp.int32(3)
+        # goal in the middle of west wall
+        y_mid = jnp.int32((self.size - 1) // 2)
+        self._goal_pos = jnp.array([y_mid, 1], dtype=jnp.int32)
+        self._goal_dir = jnp.int32(3) # wait why does the goal have a direction? (oh i think the goal "position" is where the robot has to be, not where the goal is really (which is in front of the robot)). 
 
     def observation_space(self, env_params: EnvParams):
         return gymnax.environments.spaces.Box(0, 1, (5,))
