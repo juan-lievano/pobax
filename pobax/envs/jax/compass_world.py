@@ -39,7 +39,7 @@ class CompassWorld(Environment):
         return EnvParams(max_steps_in_episode=1000)
 
     def _obs_from_state(self, pos: jnp.ndarray, dir_: jnp.ndarray) -> jnp.ndarray:
-        # one-hot over [N-wall, E-wall, S-wall, blue(W), green(W@(1,1))]
+        # one-hot over [N-wall, E-wall, S-wall, W-wall, green(W@(1,1))]
         n = (dir_ == 0) & (pos[0] == 1) # pos[0] is the row, pos[1] is the column, so this makes sense. (althogh it means the coordinates are (y,x) which is sort of annoying)
         e = (dir_ == 1) & (pos[1] == self.size - 2)
         s = (dir_ == 2) & (pos[0] == self.size - 2)
