@@ -186,7 +186,7 @@ def get_env(env_name: str,
         env_params = env.default_params
 
     elif env_name == 'compass_world':
-        env = CompassWorld(size=8, random_start=True)
+        env = CompassWorld(size=8)
         env_params = env.default_params
 
     elif env_name in pomdp_files:
