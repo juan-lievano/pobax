@@ -64,18 +64,28 @@ class CompassWorld(Environment):
         return (dir_ - 1) % 4
 
     @partial(jax.jit, static_argnums=(0,))
-    def reset_env(self, key: chex.PRNGKey, params: EnvParams) -> Tuple[jnp.ndarray, CompassWorldState]:
-        # Always random start
-        key, k1, k2, k3 = random.split(key, 4)
-        y = random.randint(k1, (), 1, self.size - 1, dtype=jnp.int32)
-        x = random.randint(k2, (), 1, self.size - 1, dtype=jnp.int32)
-        d = random.randint(k3, (), 0, 4, dtype=jnp.int32)
-        # avoid starting exactly at goal state; adjust dir if so
-        same_pos = jnp.all(jnp.array([y, x], jnp.int32) == self._goal_pos)
-        dir_ = jnp.where(jnp.logical_and(same_pos, d == self._goal_dir), (d + 1) % 4, d)
-        yx = jnp.array([y, x], dtype=jnp.int32)
+    def reset_env(self, key, params):
+        def sample_once(k):
+            k, k1, k2, k3 = random.split(k, 4)
+            y = random.randint(k1, (), 1, self.size - 1, dtype=jnp.int32)
+            x = random.randint(k2, (), 1, self.size - 1, dtype=jnp.int32)
+            d = random.randint(k3, (), 0, 4, dtype=jnp.int32)
+            pos = jnp.array([y, x], dtype=jnp.int32)
+            return k, pos, d
 
-        state = CompassWorldState(pos=yx, dir=dir_, t=jnp.int32(0))
+        key, pos, dir_ = sample_once(key)
+
+        def cond(carry):
+            k, p, d = carry
+            return jnp.logical_and(jnp.all(p == self._goal_pos), d == self._goal_dir)
+
+        def body(carry):
+            k, _, _ = carry
+            return sample_once(k)
+
+        key, pos, dir_ = jax.lax.while_loop(cond, body, (key, pos, dir_))
+
+        state = CompassWorldState(pos=pos, dir=dir_, t=jnp.int32(0))
         obs = self._obs_from_state(state.pos, state.dir)
         return obs, state
 
