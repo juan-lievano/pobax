@@ -73,32 +73,42 @@ def rollout_single_trajectory(
     def step(carry, timestep):
         rng_key, state, obs, hidden_state, prev_action, done = carry
         rng_key, rng_sample, rng_step = jr.split(rng_key, 3)
+
         if include_prev_action:
             network_input = jnp.concatenate([obs, prev_action], axis=-1)[None, None, :]
         else:
             network_input = obs[None, None, :]
+
         done_flag = done[None, None]
+
+        # This hidden_output is the hidden state to record for the current row (time_step = t).
+        hidden_output = hidden_state
+
         hidden_state_new, action_distribution, _ = apply_fn(weights, hidden_state, (network_input, done_flag))
         action = action_distribution.sample(seed=rng_sample)[0, 0].astype(jnp.int32)
+
         next_obs, next_state, _, next_done, _ = step_fn(rng_step, state, action, env_params)
         next_done_flag = jnp.logical_or(done, next_done)
+
         obs_output = obs
         pos_output = state.pos
         dir_output = state.dir
+
         obs = jnp.where(done, obs, next_obs.astype(jnp.float32))
         hidden_state = jnp.where(done, hidden_state, hidden_state_new)
         prev_action = jnp.where(done, prev_action, init_prev_action_onehot(prev_action_dim, action))
         state = jax.tree_util.tree_map(lambda a, b: jnp.where(done, a, b), state, next_state)
+
         carry = (rng_key, state, obs, hidden_state, prev_action, next_done_flag)
-        output = (obs_output, action, pos_output, dir_output, jnp.logical_not(done), timestep)
+        output = (obs_output, action, pos_output, dir_output, hidden_output, jnp.logical_not(done), timestep)
         return carry, output
 
     carry0 = (rng_key, initial_state, initial_obs, initial_hidden_state, initial_prev_action, initial_done)
-    _, (obs_seq, action_seq, pos_seq, dir_seq, mask_seq, timestep_seq) = lax.scan(
+    _, (obs_seq, action_seq, pos_seq, dir_seq, hidden_seq, mask_seq, timestep_seq) = lax.scan(
         step, carry0, jnp.arange(max_length, dtype=jnp.int32)
     )
     trajectory_length = mask_seq.sum(dtype=jnp.int32)
-    return obs_seq, action_seq, pos_seq, dir_seq, mask_seq, timestep_seq, trajectory_length
+    return obs_seq, action_seq, pos_seq, dir_seq, hidden_seq, mask_seq, timestep_seq, trajectory_length
 
 
 def rollout_batch(
@@ -189,38 +199,34 @@ def _transition_mask_precise(mask: np.ndarray, action: int, grid_size: int) -> n
     H = W = grid_size
     dest = np.zeros_like(mask, dtype=bool)
 
-    if action == 1:  # turn right
+    if action == 1:
         for d in range(4):
             dest[:, :, (d + 1) % 4] |= mask[:, :, d]
         return dest
 
-    if action == 2:  # turn left
+    if action == 2:
         for d in range(4):
             dest[:, :, (d + 3) % 4] |= mask[:, :, d]
         return dest
 
-    y_min, y_max = 1, H - 2  # inclusive interior bounds
+    y_min, y_max = 1, H - 2
     x_min, x_max = 1, W - 2
 
-    # North: (y, x, 0) -> (max(y-1, y_min), x, 0)
     src = mask[:, :, 0]
     if np.any(src):
         dest[y_min:y_max, x_min:x_max+1, 0] |= src[y_min+1:y_max+1, x_min:x_max+1]
         dest[y_min,     x_min:x_max+1, 0] |= src[y_min,             x_min:x_max+1]
 
-    # East: (y, x, 1) -> (y, min(x+1, x_max), 1)
     src = mask[:, :, 1]
     if np.any(src):
         dest[y_min:y_max+1, x_min+1:x_max+1, 1] |= src[y_min:y_max+1, x_min:x_max]
         dest[y_min:y_max+1, x_max,           1] |= src[y_min:y_max+1, x_max]
 
-    # South: (y, x, 2) -> (min(y+1, y_max), x, 2)
     src = mask[:, :, 2]
     if np.any(src):
         dest[y_min+1:y_max+1, x_min:x_max+1, 2] |= src[y_min:y_max,   x_min:x_max+1]
         dest[y_max,           x_min:x_max+1, 2] |= src[y_max,         x_min:x_max+1]
 
-    # West: (y, x, 3) -> (y, max(x-1, x_min), 3)
     src = mask[:, :, 3]
     if np.any(src):
         dest[y_min:y_max+1, x_min:x_max, 3] |= src[y_min:y_max+1, x_min+1:x_max+1]
@@ -256,19 +262,31 @@ def _beliefs_for_trajectory(
     grid_size: int,
     _obs_masks_unused: Tuple[np.ndarray, ...],
 ) -> list:
-    belief_mask = _initial_belief_mask(grid_size)
-    beliefs = []
-    belief_mask = _apply_observation_filter(belief_mask, obs_seq[0], grid_size)
-    beliefs.append(_normalize_mask(belief_mask).tolist())
+    prior_mask = _initial_belief_mask(grid_size)
+    beliefs = [_normalize_mask(prior_mask).tolist()]
+    if trajectory_length <= 1:
+        return beliefs
     for t in range(1, trajectory_length):
-        prev_action = int(action_seq[t - 1])
-        belief_mask = _transition_mask_precise(belief_mask, prev_action, grid_size)
-        belief_mask = _apply_observation_filter(belief_mask, obs_seq[t], grid_size)
-        beliefs.append(_normalize_mask(belief_mask).tolist())
+        obs_prev = obs_seq[t - 1]
+        act_prev = int(action_seq[t - 1])
+        posterior_mask = _apply_observation_filter(prior_mask, obs_prev, grid_size)
+        prior_mask = _transition_mask_precise(posterior_mask, act_prev, grid_size)
+        beliefs.append(_normalize_mask(prior_mask).tolist())
     return beliefs
 
 
-def shard_to_rows(obs_array, action_array, pos_array, dir_array, length_array, global_offset, grid_size: int):
+def shard_to_rows(
+    obs_array,
+    action_array,
+    pos_array,
+    dir_array,
+    hidden_array,
+    length_array,
+    global_offset,
+    grid_size: int,
+    hidden_size: int,
+    include_hidden: bool,
+):
     rows = {
         "trajectory_id": [],
         "time_step": [],
@@ -278,13 +296,18 @@ def shard_to_rows(obs_array, action_array, pos_array, dir_array, length_array, g
         "robot_action": [],
         "belief": [],
     }
+    if include_hidden:
+        rows["rnn_hidden"] = []
+
     obs_masks = _observation_masks(grid_size)
     n_trajectories = obs_array.shape[0]
+
     for local_id in range(n_trajectories):
         trajectory_id = global_offset + local_id
         trajectory_length = int(length_array[local_id])
         if trajectory_length <= 0:
             continue
+
         beliefs = _beliefs_for_trajectory(
             obs_array[local_id, :trajectory_length],
             action_array[local_id, :trajectory_length],
@@ -292,6 +315,7 @@ def shard_to_rows(obs_array, action_array, pos_array, dir_array, length_array, g
             grid_size,
             obs_masks,
         )
+
         rows["trajectory_id"].extend([trajectory_id] * trajectory_length)
         rows["time_step"].extend(list(range(trajectory_length)))
         rows["state_pos"].extend(to_python_list(pos_array[local_id, :trajectory_length]))
@@ -300,6 +324,13 @@ def shard_to_rows(obs_array, action_array, pos_array, dir_array, length_array, g
         rows["observation"].extend(to_python_list(obs_array[local_id, :trajectory_length]))
         rows["robot_action"].extend(to_python_list(action_array[local_id, :trajectory_length]))
         rows["belief"].extend(beliefs)
+
+        if include_hidden:
+            # keep raw hidden state shape, do not flatten/trim
+            h_slice = np.asarray(hidden_array[local_id, :trajectory_length])
+            rows["rnn_hidden"].extend([h_slice[t].tolist() for t in range(trajectory_length)])
+
+
     return rows
 
 
@@ -381,7 +412,7 @@ def main():
         shard_rng_key = jax.random.fold_in(base_rng_key, shard_idx)
         rng_keys = jax.random.split(shard_rng_key, num_this_shard)
 
-        obs_seq, action_seq, pos_seq, dir_seq, mask_seq, timestep_seq, lengths_array = rollout_batch_jit(
+        obs_seq, action_seq, pos_seq, dir_seq, hidden_seq, mask_seq, timestep_seq, lengths_array = rollout_batch_jit(
             rng_keys,
             env.reset_env,
             env.step_env,
@@ -394,19 +425,29 @@ def main():
             include_prev_action,
         )
 
-        obs_array, action_array, pos_array, dir_array, mask_array, timestep_array, length_array = jax.device_get(
-            (obs_seq, action_seq, pos_seq, dir_seq, mask_seq, timestep_seq, lengths_array)
+        obs_array, action_array, pos_array, dir_array, hidden_array, mask_array, timestep_array, length_array = jax.device_get(
+            (obs_seq, action_seq, pos_seq, dir_seq, hidden_seq, mask_seq, timestep_seq, lengths_array)
         )
         all_shard_lengths.append(length_array)
 
         rows = shard_to_rows(
-            obs_array, action_array, pos_array, dir_array, length_array, global_offset=start_index, grid_size=args.grid_size
+            obs_array=obs_array,
+            action_array=action_array,
+            pos_array=pos_array,
+            dir_array=dir_array,
+            hidden_array=hidden_array,
+            length_array=length_array,
+            global_offset=start_index,
+            grid_size=args.grid_size,
+            hidden_size=hidden_size,
+            include_hidden=not args.no_rnn_hidden_state,
         )
+
         pd.DataFrame(rows).to_csv(out_path, index=False, mode="a", header=not wrote_header)
         wrote_header = True
 
-        del rows, obs_seq, action_seq, pos_seq, dir_seq, mask_seq, timestep_seq, lengths_array
-        del obs_array, action_array, pos_array, dir_array, mask_array, timestep_array, length_array
+        del rows, obs_seq, action_seq, pos_seq, dir_seq, hidden_seq, mask_seq, timestep_seq, lengths_array
+        del obs_array, action_array, pos_array, dir_array, hidden_array, mask_array, timestep_array, length_array
 
         print(f"Shard {shard_idx + 1}/{num_shards} done: trajectories [{start_index}, {end_index - 1}]")
 
