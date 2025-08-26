@@ -32,9 +32,6 @@ def main():
 
         # 1. Distribution sums to 1
         if not np.isfinite(B).all() or abs(B.sum() - 1.0) > args.tol:
-            print(B.shape, B.sum())
-            print(i)
-            return
             failures.append((i, f"belief not normalized, sum={B.sum()}"))
         
         if (B < -args.tol).any():
