@@ -31,6 +31,8 @@ class CompassWorld(Environment):
         return gymnax.environments.spaces.Box(0, 1, (5,))
 
     def action_space(self, env_params: EnvParams):
+        # 99% sure that 0 == forward, 1 == turn_right, 2 == turn_left 
+        # (I did a visualizing thing and just now realized that it's sort of easy to accidentally transpose but I don't think that happened so that's the 1% of doubt). 
         return gymnax.environments.spaces.Discrete(3)
 
     @property
@@ -38,7 +40,7 @@ class CompassWorld(Environment):
         return EnvParams(max_steps_in_episode=1000)
 
     def _obs_from_state(self, pos: jnp.ndarray, dir_: jnp.ndarray) -> jnp.ndarray:
-        # one-hot over [N-wall, E-wall, S-wall, W-wall, green(W@(1,1))]
+        # one-hot over [N-wall, E-wall, S-wall, W-wall, goal]
         n = (dir_ == 0) & (pos[0] == 1)
         e = (dir_ == 1) & (pos[1] == self.size - 2)
         s = (dir_ == 2) & (pos[0] == self.size - 2)
