@@ -270,8 +270,8 @@ def _beliefs_for_trajectory(
         obs_prev = obs_seq[t - 1]
         act_prev = int(action_seq[t - 1])
         posterior_mask = _apply_observation_filter(prior_mask, obs_prev, grid_size)
-        prior_mask = _transition_mask_precise(posterior_mask, act_prev, grid_size)
-        beliefs.append(_normalize_mask(prior_mask).tolist())
+        prior_mask = _transition_mask_precise(posterior_mask, act_prev, grid_size) 
+        beliefs.append(_normalize_mask(prior_mask).tolist()) # it's done in two lines (but the newest belief end's up depending on obs_prev and act_prev)
     return beliefs
 
 
