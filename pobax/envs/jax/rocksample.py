@@ -1,206 +1,259 @@
-from __future__ import annotations
-
 from functools import partial
-from pathlib import Path
-from typing import Tuple, Optional
-
 import json
+from typing import Tuple, Union, Optional
+from pathlib import Path
+
 import chex
+import gymnax
+from gymnax.environments.environment import Environment, EnvParams
+from gymnax.environments import environment, spaces
 import jax
 import jax.numpy as jnp
 from jax import random, lax
 
-import gymnax
-from gymnax.environments.environment import Environment, EnvParams
-from gymnax.environments import spaces
-
 from definitions import ROOT_DIR
 
+from pobax.envs.wrappers.gymnax import GymnaxWrapper
 
-def half_dist_prob(dist: jnp.ndarray, max_dist: float, lb: float = 0.5) -> jnp.ndarray:
-    """Probability that a 'check' returns the true label, in [0, 1]."""
-    prob = (1.0 + jnp.power(2.0, -dist / max_dist)) * lb
-    return jnp.clip(prob, 0.0, 1.0).astype(jnp.float32)
+
+def half_dist_prob(dist: float, max_dist: float, lb: float = 0.5):
+    prob = (1 + jnp.power(2.0, -dist / max_dist)) * lb
+    return prob
 
 
 @chex.dataclass
 class RockSampleState:
-    position: chex.Array       # (2,) int32  [y, x]
-    rock_morality: chex.Array  # (k,) int32  values in {0,1}
+    position: chex.Array
+    rock_morality: chex.Array
+
+
+# ---- Removed PerfectMemoryRockSampleState and PerfectMemoryWrapper ----
+
+class FullyObservableWrapper(GymnaxWrapper):
+    def __init__(self, env):
+        self._env = env
+
+    def _make_full_obs(self, state: RockSampleState) -> jnp.ndarray:
+        # position one-hot
+        size = self._env.size
+        position = state.position.astype(int)
+        position_obs_y = jnp.zeros(size)
+        position_obs_x = jnp.zeros(size)
+        position_obs_y = position_obs_y.at[position[0]].set(1)
+        position_obs_x = position_obs_x.at[position[1]].set(1)
+        # true rock morality (fully observable)
+        rock_obs = state.rock_morality.astype(float)
+        return jnp.concatenate([position_obs_y, position_obs_x, rock_obs])
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, key: chex.PRNGKey, params: Optional[environment.EnvParams] = None):
+        obs, env_state = self._env.reset(key, params)
+        full_obs = self._make_full_obs(env_state)
+        return full_obs, env_state
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self,
+             key: chex.PRNGKey,
+             state: RockSampleState,
+             action: Union[int, float, jnp.ndarray],
+             params: Optional[environment.EnvParams] = None):
+        obs, next_state, reward, done, info = self._env.step(
+            key, state, action, params
+        )
+        full_obs = self._make_full_obs(next_state)
+        return full_obs, next_state, reward, done, info
 
 
 class RockSample(Environment):
-    """
-    RockSample (JAX/Gymnax).
+    direction_mapping = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]], dtype=int)
 
-    Observation shape: (2*size + k), dtype float32
-      - one-hot y position (size)
-      - one-hot x position (size)
-      - k rock observation slots for this step only:
-          0.0 : no reading this step
-         -1.0 : sampled at this rock cell this step (marker)
-          0.0/1.0 : reading from 'check rock i' (stochastic, distance-based)
-
-    Actions: Discrete(k + 5)
-      0: North, 1: East, 2: South, 3: West,
-      4: Sample (consume rock at current cell if present; +/- reward),
-      5..(k+4): Check rock i (no state change; produces an observation reading).
-
-    Episode ends (done=True) when x == size-1 (rightmost column / exit).
-    """
-    # (dy, dx) for N,E,S,W
-    direction_mapping = jnp.array([[-1, 0], [0, 1], [1, 0], [0, -1]], dtype=jnp.int32)
-
-    def __init__(
-        self,
-        key: chex.PRNGKey,
-        config_path: Path = Path(ROOT_DIR, "pobax", "envs", "configs", "rocksample_7_8_config.json"),
-    ):
-        with open(config_path) as f:
+    def __init__(self,
+                 key: chex.PRNGKey,
+                 config_path: Path = Path(ROOT_DIR, 'pobax', 'envs',
+                                          'configs', 'rocksample_7_8_config.json')):
+        """
+        RockSample environment in Gymnax.
+        Observations: position (2) and rock goodness/badness
+        Actions: k + 5 actions. Actions are as follows:
+        0: North, 1: East, 2: South, 3: West,
+        4: Sample,
+        5: Check rock 1, ..., k + 5: Check rock k
+        :param config_file: config file for RockSample (located in unc/envs/configs)
+        :param seed: random seed for the environment.
+        :param rock_obs_init: What do we initialize our rock observations with?
+        """
+        self.config_path = config_path
+        with open(self.config_path) as f:
             config = json.load(f)
 
-        self.config_path = config_path
-        self.size: int = int(config["size"])
-        self.k: int = int(config["rocks"])
+        self.size = config['size']
+        self.k = config['rocks']
 
-        self.half_efficiency_distance: float = float(config["half_efficiency_distance"])
-        self.bad_rock_reward: float = float(config["bad_rock_reward"])
-        self.good_rock_reward: float = float(config["good_rock_reward"])
-        self.exit_reward: float = float(config["exit_reward"])
+        self.rock_positions = self.generate_map(self.size, self.k, key)
 
-        # Pre-sample rock positions (exclude exit column)
-        self.rock_positions: chex.Array = self.generate_map(self.size, self.k, key)  # (k,2) int32
+        self.half_efficiency_distance = config['half_efficiency_distance']
+        self.bad_rock_reward = config['bad_rock_reward']
+        self.good_rock_reward = config['good_rock_reward']
+        self.exit_reward = config['exit_reward']
 
-    # -------------------- Gymnax API --------------------
+    def observation_space(self, env_params: EnvParams):
+        # No -1 anywhere; keep [0, 1].
+        return gymnax.environments.spaces.Box(0, 1, (2 * self.size + self.k,))
 
-    def observation_space(self, env_params: EnvParams) -> spaces.Box:
-        return spaces.Box(low=-1.0, high=1.0, shape=(2 * self.size + self.k,), dtype=jnp.float32)
-
-    def action_space(self, env_params: EnvParams) -> spaces.Discrete:
-        return spaces.Discrete(self.k + 5)
+    def action_space(self, env_params: EnvParams):
+        return gymnax.environments.spaces.Discrete(self.k + 5)
 
     @property
     def default_params(self) -> EnvParams:
         return EnvParams(max_steps_in_episode=1000)
 
-    @partial(jax.jit, static_argnums=(0,))
-    def reset(
-        self, key: chex.PRNGKey, params: Optional[EnvParams] = None
-    ) -> Tuple[chex.Array, RockSampleState]:
-        if params is None:
-            params = self.default_params
-
-        key_moral, key_pos = random.split(key)
-        rock_morality = self.sample_morality(key_moral)  # (k,) int32
-        agent_position = self.sample_positions(self.size, key_pos, 1)[0]  # (2,) int32
-
-        state = RockSampleState(position=agent_position, rock_morality=rock_morality)
-        obs = self._get_obs(state, jnp.int32(0), key).astype(jnp.float32)  # no check on reset
-        return lax.stop_gradient(obs), lax.stop_gradient(state)
-
-    @partial(jax.jit, static_argnums=(0,))
-    def step(
-        self,
-        key: chex.PRNGKey,
-        state: RockSampleState,
-        action: int,
-        params: EnvParams,
-    ) -> Tuple[chex.Array, RockSampleState, jnp.ndarray, jnp.ndarray, dict]:
-        if params is None:
-            params = self.default_params
-
-        a = jnp.asarray(action, dtype=jnp.int32)
-
-        # --- SAMPLE transition (if action == 4) ---
-        def _do_sample(_):
-            ele = (self.rock_positions == state.position)           # (k,2) bool
-            on_cell = jnp.all(ele, axis=-1).astype(jnp.int32)       # (k,) 1 where rock at agent cell
-            new_rock_morality = jnp.maximum(state.rock_morality - on_cell, 0)
-
-            all_rock_rews = (self.good_rock_reward * state.rock_morality.astype(jnp.float32) +
-                             self.bad_rock_reward  * (1 - state.rock_morality).astype(jnp.float32))
-            rew = jnp.dot(on_cell.astype(jnp.float32), all_rock_rews)  # scalar float32
-            return new_rock_morality, rew
-
-        rock_morality, samp_rew = lax.cond(a == 4, _do_sample, lambda _: (state.rock_morality, jnp.float32(0.0)), operand=None)
-
-        # --- MOVE transition (if action in {0,1,2,3}) ---
-        def _do_move(_):
-            new_pos = state.position + self.direction_mapping[a % 4]
-            pos_max = jnp.array([self.size - 1, self.size - 1], dtype=jnp.int32)
-            return jnp.maximum(jnp.minimum(new_pos, pos_max), 0)
-
-        position = lax.cond(a < 4, _do_move, lambda _: state.position, operand=None)
-
-        # --- Termination & exit reward ---
-        terminal = (position[1] == (self.size - 1))  # bool
-        reward = samp_rew + terminal.astype(jnp.float32) * jnp.float32(self.exit_reward)
-
-        next_state = RockSampleState(position=position, rock_morality=rock_morality)
-        obs = self._get_obs(next_state, a, key).astype(jnp.float32)
-        info = {}
-
-        return (
-            lax.stop_gradient(obs),
-            lax.stop_gradient(next_state),
-            reward.astype(jnp.float32),                 # scalar (0-dim) float32
-            jnp.asarray(terminal, dtype=jnp.bool_),     # scalar (0-dim) bool
-            info,
-        )
-
-    # -------------------- Internals --------------------
+    @staticmethod
+    def generate_map(size: int, k: int,
+                     rand_key: random.PRNGKey) -> jnp.ndarray:
+        rows_range = jnp.arange(size)
+        cols_range = rows_range[:-1]
+        possible_rock_positions = jnp.dstack(jnp.meshgrid(rows_range, cols_range)).reshape(-1, 2)
+        all_positions_idx = random.choice(rand_key,
+                                          possible_rock_positions.shape[0], (k, ),
+                                          replace=False)
+        all_positions = possible_rock_positions[all_positions_idx]
+        return all_positions
 
     @staticmethod
-    def generate_map(size: int, k: int, key: chex.PRNGKey) -> chex.Array:
-        """Pick k distinct rock positions, excluding the exit column (x == size-1)."""
-        rows = jnp.arange(size, dtype=jnp.int32)
-        cols = jnp.arange(size - 1, dtype=jnp.int32)  # exclude last column
-        cand = jnp.dstack(jnp.meshgrid(rows, cols, indexing="ij")).reshape(-1, 2)  # (size*(size-1),2)
-        idx = random.choice(key, cand.shape[0], shape=(k,), replace=False)
-        return cand[idx].astype(jnp.int32)
-
-    @staticmethod
-    @partial(jax.jit, static_argnums=(0, 2))
-    def sample_positions(size: int, key: chex.PRNGKey, n: int = 1) -> chex.Array:
-        """Sample n valid positions uniformly, excluding exit column."""
-        rows = jnp.arange(size, dtype=jnp.int32)
-        cols = jnp.arange(size - 1, dtype=jnp.int32)
-        cand = jnp.dstack(jnp.meshgrid(rows, cols, indexing="ij")).reshape(-1, 2)  # (size*(size-1),2)
-        idx = random.choice(key, cand.shape[0], shape=(n,), replace=True)
-        return cand[idx].astype(jnp.int32)
+    @partial(jax.jit, static_argnums=(0, -1))
+    def sample_positions(size: int, rand_key: random.PRNGKey, n: int = 1):
+        rows_range = jnp.arange(size)
+        cols_range = rows_range[:-1]
+        possible_positions = jnp.dstack(jnp.meshgrid(rows_range, cols_range)).reshape(-1, 2)
+        sample_idx = random.choice(rand_key, (size - 1) * size, (n, ), replace=True)
+        sample_position = jnp.array(possible_positions[sample_idx], dtype=int)
+        return sample_position
 
     @partial(jax.jit, static_argnums=(0,))
-    def sample_morality(self, key: chex.PRNGKey) -> chex.Array:
-        """Bernoulli(k) rock labels: 1=good, 0=bad (int32)."""
-        return random.bernoulli(key, p=0.5, shape=(self.rock_positions.shape[0],)).astype(jnp.int32)
+    def sample_morality(self, rand_key: random.PRNGKey) -> jnp.ndarray:
+        k = self.rock_positions.shape[0]
+        return random.bernoulli(rand_key, shape=(k, )).astype(int)
+
+    def get_obs(self, state: RockSampleState, action: int, key: chex.PRNGKey) -> jnp.ndarray:
+        """
+        Observation is dependent on action here.
+        Observation is a size ** 2 + k vector:
+        first two features are the position.
+        last k features are the current_rock_obs.
+        :param state:
+        :param action:
+        :return:
+        """
+        position_obs_y = jnp.zeros(self.size)
+        position_obs_x = jnp.zeros(self.size)
+        position = state.position.astype(int)
+        position_obs_y = position_obs_y.at[position[0]].set(1)
+        position_obs_x = position_obs_x.at[position[1]].set(1)
+
+        # CHECK
+        check_inputs = (state, action, key)
+
+        current_rocks_obs = jax.lax.cond(action > 4,
+                                         self._check_transition,
+                                         lambda x: jnp.zeros(self.k, dtype=int),
+                                         check_inputs)
+
+        return jnp.concatenate([position_obs_y, position_obs_x, current_rocks_obs])
 
     @partial(jax.jit, static_argnums=(0,))
-    def _get_obs(self, state: RockSampleState, action: jnp.ndarray, key: chex.PRNGKey) -> chex.Array:
-        """Build observation: [onehot_y | onehot_x | rock_obs(k)], dtype int32, convert to float32 by caller."""
-        # Position one-hots
-        y_oh = jnp.zeros(self.size, dtype=jnp.int32).at[state.position[0]].set(1)
-        x_oh = jnp.zeros(self.size, dtype=jnp.int32).at[state.position[1]].set(1)
+    def reset_env(self, key: chex.PRNGKey, params: EnvParams) -> Tuple[jnp.ndarray, RockSampleState]:
 
-        # Rock observation block (depends on action)
-        def _check(_):
-            rock_idx = (action - 5).astype(jnp.int32)
-            dist = jnp.linalg.norm(state.position.astype(jnp.float32) -
-                                   self.rock_positions[rock_idx].astype(jnp.float32), ord=2)
-            prob = half_dist_prob(dist, self.half_efficiency_distance)  # float32 in [0,1]
-            true_lab = state.rock_morality[rock_idx].astype(jnp.int32)
-            choices = jnp.array([true_lab, 1 - true_lab], dtype=jnp.int32)
-            probs = jnp.array([prob, 1.0 - prob], dtype=jnp.float32)
-            reading = random.choice(key, choices, shape=(1,), p=probs)[0]  # int32 0/1
-            return jnp.zeros(self.k, dtype=jnp.int32).at[rock_idx].set(reading)
+        morality_key, position_key = random.split(key)
+        rock_morality = self.sample_morality(morality_key)
+        agent_position = self.sample_positions(self.size, position_key, 1)[0]
 
-        rock_obs = lax.cond(action > 4, _check, lambda _: jnp.zeros(self.k, dtype=jnp.int32), operand=None)
+        state = RockSampleState(position=agent_position,
+                                rock_morality=rock_morality)
 
-        # If sampling, put -1 at rock(s) on the current cell (marker)
-        def _sample_marker(rocks_block):
-            ele = (self.rock_positions == state.position)   # (k,2) bool
-            on_cell = jnp.all(ele, axis=-1).astype(jnp.int32)  # (k,)
-            return rocks_block * (1 - on_cell) + (-1) * on_cell
+        # we use the 0 action here, since it's < 4
+        return self.get_obs(state, 0, key), state
 
-        rock_obs = lax.cond(action == 4, _sample_marker, lambda x: x, rock_obs)
+    def _check_transition(self, check_inps: tuple[RockSampleState, int, chex.PRNGKey]):
+        state, action, rand_key = check_inps
 
-        return jnp.concatenate([y_oh, x_oh, rock_obs], axis=0).astype(jnp.int32)
+        rock_idx = action - 5
+        dist = jnp.linalg.norm(state.position - self.rock_positions[rock_idx], ord=2)
+        prob = half_dist_prob(dist, self.half_efficiency_distance)
+
+        # w.p. prob we return correct rock observation (0/1 only; no -1).
+        rock_obs = state.rock_morality[rock_idx]
+        choices = jnp.array([rock_obs, 1 - rock_obs])
+        probs = jnp.array([prob, 1 - prob])
+        rock_obs = random.choice(rand_key, choices, (1, ), p=probs)[0]
+
+        # Changed: write the reading verbatim (0 or 1), not -1 for 0.
+        obs = jnp.zeros(self.k, dtype=rock_obs.dtype).at[rock_idx].set(rock_obs)
+        return obs
+
+    def _move_transition(self, move_inps: tuple[RockSampleState, EnvParams, int]):
+        state, params, action = move_inps
+
+        new_pos = state.position + self.direction_mapping[action % self.direction_mapping.shape[0]]
+        pos_max = jnp.array([self.size - 1, self.size - 1])
+        new_position = jnp.maximum(jnp.minimum(new_pos, pos_max), 0)
+
+        return new_position
+
+    def _sample_transition(self, sample_inps: tuple[RockSampleState, EnvParams]):
+        state, params = sample_inps
+
+        ele = (self.rock_positions == state.position)
+        bool_pos = jnp.all(ele, axis=-1).astype(int)
+
+        zero_arr = jnp.zeros_like(state.rock_morality)
+        new_rock_morality = jnp.maximum(state.rock_morality - bool_pos, zero_arr)
+
+        all_rock_rews = self.good_rock_reward * state.rock_morality \
+                        + self.bad_rock_reward * (1 - state.rock_morality)
+        rew = jnp.dot(bool_pos, all_rock_rews)
+        sample_outs = (new_rock_morality, rew)
+
+        return sample_outs
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step_env(self,
+                 key: chex.PRNGKey,
+                 state: RockSampleState,
+                 action: int,
+                 params: EnvParams):
+
+        # Note: we can pass in unmodified state to each branch b/c they never happen simultaneously.
+
+        # SAMPLING
+        sampling_inputs = (state, params)
+
+        no_change_outs = (state.rock_morality, 0.)
+        sample_outs = jax.lax.cond(action == 4,
+                                   self._sample_transition,
+                                   lambda x: no_change_outs,
+                                   sampling_inputs)
+        rock_morality, reward = sample_outs
+
+        # MOVING
+        move_inputs = (state, params, action)
+
+        position = jax.lax.cond(action < 4,
+                                self._move_transition,
+                                lambda x: state.position,
+                                move_inputs)
+
+        terminal = position[1] == (self.size - 1)
+        reward += terminal * self.exit_reward
+
+        info = {
+            # 'rock_morality': rock_morality,
+            # 'agent_position': position,
+            # 'rock_positions': self.rock_positions
+        }
+        next_state = RockSampleState(position=position,
+                                     rock_morality=rock_morality)
+
+        # check is dealt with in get_obs
+        obs = self.get_obs(next_state, action, key)
+
+        return lax.stop_gradient(obs), lax.stop_gradient(next_state), reward, terminal, info
