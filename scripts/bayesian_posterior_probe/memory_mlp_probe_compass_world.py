@@ -33,15 +33,81 @@ def tensor_to_json(t: np.ndarray) -> str:
     return json.dumps(np.asarray(t, dtype=float).tolist(), separators=(",", ":"))
 
 
-def uniform_baseline_tensor(grid_size: int) -> np.ndarray:
+def initial_distribution_baseline_tensor(grid_size: int) -> np.ndarray:
+    """
+    Initial-distribution baseline: truly uniform over ALL cells and directions.
+    """
     gs = grid_size
-    base = np.zeros((gs, gs, 4), dtype=np.float64)
-    base[1:gs-1, 1:gs-1, :] = 1.0
-    y_goal = (gs - 1) // 2
-    base[y_goal, 1, 3] = 0.0
-    n = float((gs - 2) * (gs - 2) * 4 - 1)
-    base[1:gs-1, 1:gs-1, :] /= n
+    base = np.ones((gs, gs, 4), dtype=np.float64)
+    base /= base.sum()
     return base
+
+
+# ---- Triangular grid viz helpers (0=N,1=E,2=S,3=W) ----
+def triangles_for_cell(x, y):
+    bl = (x,   y)
+    br = (x+1, y)
+    tl = (x,   y+1)
+    tr = (x+1, y+1)
+    c = (x+0.5, y+0.5)
+    tri_N = [tl, tr, c]   # 0
+    tri_E = [tr, br, c]   # 1
+    tri_S = [br, bl, c]   # 2
+    tri_W = [bl, tl, c]   # 3
+    return [tri_N, tri_E, tri_S, tri_W]
+
+
+def save_triangular_grid(prob_tensor: np.ndarray, save_path: Path, title: str = "",
+                         vmin: float = 0.0, vmax: float | None = None):
+    """
+    Save a single-grid triangular heatmap PNG of prob_tensor (gs, gs, 4),
+    using a fixed color scale [vmin, vmax] so colors are comparable across plots.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+    from matplotlib.colors import Normalize
+
+    gs = prob_tensor.shape[0]
+    polys, vals = [], []
+
+    for y in range(gs):
+        for x in range(gs):
+            tris = triangles_for_cell(x, y)  # [N,E,S,W]
+            for d in range(4):
+                polys.append(tris[d])
+                vals.append(float(prob_tensor[y, x, d]))
+
+    vals = np.asarray(vals, dtype=float)
+
+    if vmax is None:
+        vmax = float(np.max(vals))
+
+    fig, ax = plt.subplots()
+    norm = Normalize(vmin=vmin, vmax=vmax)
+
+    pc = PolyCollection(polys, edgecolors="k", linewidths=0.5)
+    pc.set_array(vals)
+    pc.set_norm(norm)
+    ax.add_collection(pc)
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(0, gs)
+    ax.set_ylim(0, gs)
+    # ax.invert_yaxis()  # don't invert
+    ax.set_xticks(range(gs+1))
+    ax.set_yticks(range(gs+1))
+    ax.grid(True, which="both", linewidth=0.5)
+
+    cbar = fig.colorbar(pc, ax=ax)
+    cbar.set_label("Probability")
+
+    if title:
+        ax.set_title(title)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+
+    fig.savefig(save_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main():
@@ -68,6 +134,7 @@ def main():
     df["rnn_hidden"] = df["rnn_hidden"].apply(lambda s: parse_rnn_hidden(s, args.hidden_size))
     df["belief_tensor"] = df["belief"].apply(lambda s: parse_belief_tensor(s, args.grid_size))
 
+    # Trajectory-aware split if available
     if "trajectory_id" in df.columns:
         traj_ids = df["trajectory_id"].unique()
         train_ids, test_ids = train_test_split(traj_ids, test_size=args.test_size, random_state=0, shuffle=True)
@@ -77,11 +144,14 @@ def main():
         df_train, df_test = train_test_split(df, test_size=args.test_size, random_state=0, shuffle=True)
 
     X_train = np.vstack(df_train["rnn_hidden"].to_list())
-    Y_train = np.stack(df_train["belief_tensor"].to_list()).reshape(len(df_train), -1)
+    Y_train_tensor = np.stack(df_train["belief_tensor"].to_list())  # (n_train, gs, gs, 4)
+    Y_train = Y_train_tensor.reshape(len(df_train), -1)
+
     X_test = np.vstack(df_test["rnn_hidden"].to_list())
     Y_test_tensor = np.stack(df_test["belief_tensor"].to_list())
     Y_test = Y_test_tensor.reshape(len(df_test), -1)
 
+    # Model
     mlp = MLPRegressor(
         hidden_layer_sizes=tuple(args.hidden_layers),
         activation="relu",
@@ -96,10 +166,12 @@ def main():
     model = make_pipeline(StandardScaler(), mlp)
     model.fit(X_train, Y_train)
 
+    # Predictions and primary metrics
     Y_pred_raw = model.predict(X_test)
     mse = float(np.mean((Y_test - Y_pred_raw) ** 2))
 
     eps = args.eps
+    # For metrics we keep the stabilized/normalized copies:
     Y_pred = np.clip(Y_pred_raw, eps, None)
     Y_pred /= Y_pred.sum(axis=1, keepdims=True)
 
@@ -107,16 +179,29 @@ def main():
     Y_true /= Y_true.sum(axis=1, keepdims=True)
 
     tv = float(np.mean(0.5 * np.sum(np.abs(Y_true - Y_pred), axis=1)))
-    kl = float(np.mean([entropy(t, p) for t, p in zip(Y_true, Y_pred)]))
+    kl_bits = float(np.mean([entropy(t, p, base=2) for t, p in zip(Y_true, Y_pred)]))
 
-    base_tensor = uniform_baseline_tensor(args.grid_size)
-    base_vec = base_tensor.reshape(-1)
-    base_pred = np.tile(base_vec, (Y_true.shape[0], 1))
-    base_pred = np.clip(base_pred, eps, None)
-    base_pred /= base_pred.sum(axis=1, keepdims=True)
-    base_tv = float(np.mean(0.5 * np.sum(np.abs(Y_true - base_pred), axis=1)))
-    base_kl = float(np.mean([entropy(t, p) for t, p in zip(Y_true, base_pred)]))
+    # Baseline 1: initial_distribution_baseline (truly uniform)
+    init_base_tensor = initial_distribution_baseline_tensor(args.grid_size)
+    init_base_vec = init_base_tensor.reshape(-1)
+    init_base_pred = np.tile(init_base_vec, (Y_true.shape[0], 1))
+    init_base_pred = np.clip(init_base_pred, eps, None)
+    init_base_pred /= init_base_pred.sum(axis=1, keepdims=True)
 
+    init_base_tv = float(np.mean(0.5 * np.sum(np.abs(Y_true - init_base_pred), axis=1)))
+    init_base_kl_bits = float(np.mean([entropy(t, p, base=2) for t, p in zip(Y_true, init_base_pred)]))
+
+    # Baseline 2: average_belief_baseline (mean over TRAIN beliefs)
+    avg_belief_tensor = np.mean(Y_train_tensor, axis=0)  # (gs, gs, 4)
+    avg_belief_vec = avg_belief_tensor.reshape(-1)
+    avg_belief_pred = np.tile(avg_belief_vec, (Y_true.shape[0], 1))
+    avg_belief_pred = np.clip(avg_belief_pred, eps, None)
+    avg_belief_pred /= avg_belief_pred.sum(axis=1, keepdims=True)
+
+    avg_belief_tv = float(np.mean(0.5 * np.sum(np.abs(Y_true - avg_belief_pred), axis=1)))
+    avg_belief_kl_bits = float(np.mean([entropy(t, p, base=2) for t, p in zip(Y_true, avg_belief_pred)]))
+
+    # "Should-know" & impossible-mass metrics
     N = Y_true.shape[0]
     true_arg = np.argmax(Y_true, axis=1)
     true_max = Y_true[np.arange(N), true_arg]
@@ -133,39 +218,58 @@ def main():
         prob_on_true = float("nan")
 
     impossible_mask = Y_true <= args.tol
+
+    # Model impossible mass
     impossible_mass_overall = float(np.mean(np.sum(Y_pred * impossible_mask, axis=1)))
     if knows_count > 0:
         impossible_mass_should_know = float(np.mean(np.sum(Y_pred[knows_mask] * impossible_mask[knows_mask], axis=1)))
     else:
         impossible_mass_should_know = float("nan")
 
-    base_impossible_mass_overall = float(np.mean(np.sum(base_pred * impossible_mask, axis=1)))
+    # initial_distribution_baseline impossible mass
+    init_base_impossible_mass_overall = float(np.mean(np.sum(init_base_pred * impossible_mask, axis=1)))
     if knows_count > 0:
-        base_impossible_mass_should_know = float(np.mean(np.sum(base_pred[knows_mask] * impossible_mask[knows_mask], axis=1)))
+        init_base_impossible_mass_should_know = float(np.mean(
+            np.sum(init_base_pred[knows_mask] * impossible_mask[knows_mask], axis=1)
+        ))
     else:
-        base_impossible_mass_should_know = float("nan")
+        init_base_impossible_mass_should_know = float("nan")
 
+    # average_belief_baseline impossible mass
+    avg_belief_impossible_mass_overall = float(np.mean(np.sum(avg_belief_pred * impossible_mask, axis=1)))
+    if knows_count > 0:
+        avg_belief_impossible_mass_should_know = float(np.mean(
+            np.sum(avg_belief_pred[knows_mask] * impossible_mask[knows_mask], axis=1)
+        ))
+    else:
+        avg_belief_impossible_mass_should_know = float("nan")
+
+    # Reporting
     print(f"MSE: {mse:.6f}")
     print(f"TV: {tv:.6f}")
-    print(f"Mean KL: {kl:.6f}")
-    print(f"Baseline TV (uniform-interior-no-goal): {base_tv:.6f}")
-    print(f"Baseline Mean KL (uniform-interior-no-goal): {base_kl:.6f}")
+    print(f"Mean KL (bits): {kl_bits:.6f}")
+    print(f"Initial-distribution baseline TV: {init_base_tv:.6f}")
+    print(f"Initial-distribution baseline Mean KL (bits): {init_base_kl_bits:.6f}")
+    print(f"Average-belief baseline TV: {avg_belief_tv:.6f}")
+    print(f"Average-belief baseline Mean KL (bits): {avg_belief_kl_bits:.6f}")
     print(f"'Should-know' steps: {knows_count} / {N} ({100.0*knows_frac:.2f}%)")
     print(f"Argmax match rate (should-know): {match_rate:.6f}")
     print(f"Mean predicted prob on true location (should-know): {prob_on_true:.6f}")
     print(f"Impossible mass (overall): {impossible_mass_overall:.6f}")
     print(f"Impossible mass (should-know): {impossible_mass_should_know:.6f}")
-    print(f"Baseline impossible mass (overall): {base_impossible_mass_overall:.6f}")
-    print(f"Baseline impossible mass (should-know): {base_impossible_mass_should_know:.6f}")
+    print(f"Initial-distribution baseline impossible mass (overall): {init_base_impossible_mass_overall:.6f}")
+    print(f"Initial-distribution baseline impossible mass (should-know): {init_base_impossible_mass_should_know:.6f}")
+    print(f"Average-belief baseline impossible mass (overall): {avg_belief_impossible_mass_overall:.6f}")
+    print(f"Average-belief baseline impossible mass (should-know): {avg_belief_impossible_mass_should_know:.6f}")
 
+    # Outputs
     out_root = Path("memory_probe_results_mlp")
     out_dir = out_root / Path(args.csv).name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     joblib.dump(model, out_dir / "model.joblib")
 
-    
-
+    # Save metrics JSON
     meta = {
         "csv": Path(args.csv).name,
         "hidden_size": args.hidden_size,
@@ -179,22 +283,27 @@ def main():
         "n_test": int(X_test.shape[0]),
         "mse": mse,
         "tv": tv,
-        "mean_kl": kl,
-        "baseline_tv": base_tv,
-        "baseline_mean_kl": base_kl,
+        "mean_kl_bits": kl_bits,
+        "initial_distribution_baseline_tv": init_base_tv,
+        "initial_distribution_baseline_mean_kl_bits": init_base_kl_bits,
+        "initial_distribution_baseline_impossible_mass_overall": init_base_impossible_mass_overall,
+        "initial_distribution_baseline_impossible_mass_should_know": init_base_impossible_mass_should_know,
+        "average_belief_baseline_tv": avg_belief_tv,
+        "average_belief_baseline_mean_kl_bits": avg_belief_kl_bits,
+        "average_belief_baseline_impossible_mass_overall": avg_belief_impossible_mass_overall,
+        "average_belief_baseline_impossible_mass_should_know": avg_belief_impossible_mass_should_know,
         "should_know_count": knows_count,
         "should_know_frac": knows_frac,
         "argmax_match_rate": match_rate,
         "mean_prob_on_true_location": prob_on_true,
         "impossible_mass_overall": impossible_mass_overall,
         "impossible_mass_should_know": impossible_mass_should_know,
-        "baseline_impossible_mass_overall": base_impossible_mass_overall,
-        "baseline_impossible_mass_should_know": base_impossible_mass_should_know,
         "duration_seconds": round(time.time() - t0, 3),
     }
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(meta, f, indent=2)
 
+    # Per-row tensors CSV
     pred_tensor = Y_pred.reshape((-1, args.grid_size, args.grid_size, 4))
     true_tensor = Y_true.reshape((-1, args.grid_size, args.grid_size, 4))
     abs_err_tensor = np.abs(pred_tensor - true_tensor)
@@ -208,7 +317,45 @@ def main():
     enriched_name = f"test_with_mlp_predictions_{Path(args.csv).name}"
     df_out.to_csv(out_dir / enriched_name, index=False)
 
-    print(f"Saved model, metrics, and test set to: {out_dir}")
+    # ---- Build visualization tensors WITH clipping & normalization ----
+    def renorm_tensor(t: np.ndarray, eps: float) -> np.ndarray:
+        t = np.clip(t.astype(float), eps, None)
+        s = float(t.sum())
+        if s > 0:
+            t /= s
+        return t
+
+    avg_belief_vis = renorm_tensor(avg_belief_tensor.copy(), eps=args.eps)
+    init_base_vis = renorm_tensor(init_base_tensor.copy(), eps=args.eps)
+
+    # Use already-normalized per-row predictions (Y_pred), then average across rows;
+    # mean of dists is a dist, but we renorm again for safety.
+    avg_mlp_vec = Y_pred.mean(axis=0)
+    avg_mlp_vis = renorm_tensor(avg_mlp_vec.reshape(args.grid_size, args.grid_size, 4), eps=args.eps)
+
+    # Compute a GLOBAL color scale across all three images
+    vmin = 0.0
+    vmax = float(np.max([avg_belief_vis.max(), init_base_vis.max(), avg_mlp_vis.max()]))
+
+    # Save images with fixed global scale
+    avg_belief_png = out_dir / "average_belief_triangles.png"
+    init_base_png = out_dir / "initial_distribution_baseline_triangles.png"
+    avg_mlp_png = out_dir / "average_mlp_prediction_test_triangles.png"
+
+    save_triangular_grid(avg_belief_vis, avg_belief_png,
+                         title="Average Bayesian Belief Baseline",
+                         vmin=vmin, vmax=vmax)
+    save_triangular_grid(init_base_vis, init_base_png,
+                         title="Initial-distribution Baseline",
+                         vmin=vmin, vmax=vmax)
+    save_triangular_grid(avg_mlp_vis, avg_mlp_png,
+                         title="Average MLP Prediction",
+                         vmin=vmin, vmax=vmax)
+
+    print(f"Saved model, metrics, CSV, and images to: {out_dir}")
+    print(f"- {avg_belief_png.name}")
+    print(f"- {init_base_png.name}")
+    print(f"- {avg_mlp_png.name}")
     print(f"Duration: {meta['duration_seconds']:.3f}s")
 
 
