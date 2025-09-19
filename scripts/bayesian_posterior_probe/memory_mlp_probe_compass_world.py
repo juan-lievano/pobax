@@ -35,11 +35,18 @@ def tensor_to_json(t: np.ndarray) -> str:
 
 def initial_distribution_baseline_tensor(grid_size: int) -> np.ndarray:
     """
-    Initial-distribution baseline: truly uniform over ALL cells and directions.
+    Old 'uniform-interior-no-goal' baseline, now named initial_distribution_baseline.
+
+    Places uniform mass over interior cells and directions, except for a single
+    excluded (goal) state on the west wall mid-cell. Then normalizes.
     """
     gs = grid_size
-    base = np.ones((gs, gs, 4), dtype=np.float64)
-    base /= base.sum()
+    base = np.zeros((gs, gs, 4), dtype=np.float64)
+    base[1:gs-1, 1:gs-1, :] = 1.0
+    y_goal = (gs - 1) // 2
+    base[y_goal, 1, 3] = 0.0
+    n = float((gs - 2) * (gs - 2) * 4 - 1)
+    base[1:gs-1, 1:gs-1, :] /= n
     return base
 
 
@@ -58,10 +65,10 @@ def triangles_for_cell(x, y):
 
 
 def save_triangular_grid(prob_tensor: np.ndarray, save_path: Path, title: str = "",
-                         vmin: float = 0.0, vmax: float | None = None):
+                         vmin: float | None = None, vmax: float | None = None):
     """
     Save a single-grid triangular heatmap PNG of prob_tensor (gs, gs, 4),
-    using a fixed color scale [vmin, vmax] so colors are comparable across plots.
+    using a fixed color scale [vmin, vmax] if provided so colors are comparable across plots.
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
@@ -79,6 +86,9 @@ def save_triangular_grid(prob_tensor: np.ndarray, save_path: Path, title: str = 
 
     vals = np.asarray(vals, dtype=float)
 
+    # If not provided, auto-scale from this tensor (but we pass globals from caller)
+    if vmin is None:
+        vmin = float(np.min(vals))
     if vmax is None:
         vmax = float(np.max(vals))
 
@@ -93,7 +103,7 @@ def save_triangular_grid(prob_tensor: np.ndarray, save_path: Path, title: str = 
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(0, gs)
     ax.set_ylim(0, gs)
-    # ax.invert_yaxis()  # don't invert
+    ax.invert_yaxis()  # (0,0) visually at bottom-left
     ax.set_xticks(range(gs+1))
     ax.set_yticks(range(gs+1))
     ax.grid(True, which="both", linewidth=0.5)
@@ -171,7 +181,7 @@ def main():
     mse = float(np.mean((Y_test - Y_pred_raw) ** 2))
 
     eps = args.eps
-    # For metrics we keep the stabilized/normalized copies:
+    # For metrics we keep stabilized/normalized copies:
     Y_pred = np.clip(Y_pred_raw, eps, None)
     Y_pred /= Y_pred.sum(axis=1, keepdims=True)
 
@@ -181,7 +191,7 @@ def main():
     tv = float(np.mean(0.5 * np.sum(np.abs(Y_true - Y_pred), axis=1)))
     kl_bits = float(np.mean([entropy(t, p, base=2) for t, p in zip(Y_true, Y_pred)]))
 
-    # Baseline 1: initial_distribution_baseline (truly uniform)
+    # Baseline 1: initial_distribution_baseline (uniform interior, exclude one goal state)
     init_base_tensor = initial_distribution_baseline_tensor(args.grid_size)
     init_base_vec = init_base_tensor.reshape(-1)
     init_base_pred = np.tile(init_base_vec, (Y_true.shape[0], 1))
@@ -317,25 +327,17 @@ def main():
     enriched_name = f"test_with_mlp_predictions_{Path(args.csv).name}"
     df_out.to_csv(out_dir / enriched_name, index=False)
 
-    # ---- Build visualization tensors WITH clipping & normalization ----
-    def renorm_tensor(t: np.ndarray, eps: float) -> np.ndarray:
-        t = np.clip(t.astype(float), eps, None)
-        s = float(t.sum())
-        if s > 0:
-            t /= s
-        return t
+    # ---- Build visualization tensors WITHOUT clipping/normalization ----
+    avg_belief_vis = avg_belief_tensor.copy()  # mean of train beliefs, raw
+    init_base_vis = init_base_tensor.copy()    # initial baseline, already normalized by construction
+    avg_mlp_vis = Y_pred_raw.mean(axis=0).reshape(args.grid_size, args.grid_size, 4)  # raw mean of raw preds
 
-    avg_belief_vis = renorm_tensor(avg_belief_tensor.copy(), eps=args.eps)
-    init_base_vis = renorm_tensor(init_base_tensor.copy(), eps=args.eps)
+    # Compute a GLOBAL color scale across all three images (show negatives if present)
+    all_vals_min = float(np.min([avg_belief_vis.min(), init_base_vis.min(), avg_mlp_vis.min()]))
+    all_vals_max = float(np.max([avg_belief_vis.max(), init_base_vis.max(), avg_mlp_vis.max()]))
 
-    # Use already-normalized per-row predictions (Y_pred), then average across rows;
-    # mean of dists is a dist, but we renorm again for safety.
-    avg_mlp_vec = Y_pred.mean(axis=0)
-    avg_mlp_vis = renorm_tensor(avg_mlp_vec.reshape(args.grid_size, args.grid_size, 4), eps=args.eps)
-
-    # Compute a GLOBAL color scale across all three images
-    vmin = 0.0
-    vmax = float(np.max([avg_belief_vis.max(), init_base_vis.max(), avg_mlp_vis.max()]))
+    vmin = all_vals_min
+    vmax = all_vals_max
 
     # Save images with fixed global scale
     avg_belief_png = out_dir / "average_belief_triangles.png"
@@ -356,7 +358,7 @@ def main():
     print(f"- {avg_belief_png.name}")
     print(f"- {init_base_png.name}")
     print(f"- {avg_mlp_png.name}")
-    print(f"Duration: {meta['duration_seconds']:.3f}s")
+    print(f"Duration: {time.time() - t0:.3f}s")
 
 
 if __name__ == "__main__":
