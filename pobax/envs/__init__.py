@@ -13,6 +13,7 @@ from pobax.envs.jax.battleship import Battleship
 from pobax.envs.jax.battleship import PerfectMemoryWrapper as BSPerfectMemoryWrapper
 from pobax.envs.classic import load_pomdp, load_pomdp
 from pobax.envs.jax.compass_world import CompassWorld
+from pobax.envs.jax.sun_and_moon import SunAndMoon 
 from pobax.envs.jax.fishing import Fishing
 from pobax.envs.jax.pocman import PocMan
 from pobax.envs.jax.pocman import PocManStateWrapper as PMPerfectMemoryWrapper
@@ -189,6 +190,10 @@ def get_env(env_name: str,
         env = CompassWorld(size=8)
         env_params = env.default_params
 
+    elif env_name == 'sun_and_moon':
+        env = SunAndMoon()
+        env_params = env.default_params
+
     elif env_name in pomdp_files:
         env = load_pomdp(env_name, fully_observable=fo_pomdp)
         if hasattr(env, 'gamma'):
@@ -243,7 +248,7 @@ def get_env(env_name: str,
         if perfect_memory:
             env = RSPerfectMemoryWrapper(env)
 
-    elif env_name.startswith('Navix-DMLab'):
+    elif env_name.startswith('Navix-'):
         nx_env = nx.make(env_name)
         env = NavixGymnaxWrapper(nx_env)
         env_params = env.default_params

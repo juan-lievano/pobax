@@ -10,7 +10,7 @@ import navix as nx
 from navix import rewards, terminations, observations, transitions
 from navix.actions import DEFAULT_ACTION_SET
 from navix.entities import Wall, Player, Goal
-from navix.environments import Timestep
+from navix.environments import Timestep, FourRooms
 from navix.environments import Environment as NavixEnvironment
 from navix.grid import random_positions, random_directions
 from navix.rendering.cache import RenderingCache
@@ -30,6 +30,29 @@ import numpy as np
 # #........#
 # ##########
 # """
+
+four_rooms_19_19 = """
+###################
+#........#........#
+#........#........#
+#........#........#
+#........#........#
+#.................#
+#........#........#
+#........#........#
+#........#........#
+#####.#######.#####
+#........#........#
+#........#........#
+#........#........#
+#.................#
+#........#........#
+#........#........#
+#........#........#
+#........#........#
+###################
+"""
+
 nav_maze_random_goal_00 = """
 ##############
 #...#...#....#
@@ -125,6 +148,7 @@ nav_maze_random_goal_03 = """
 class ASCIIMaze(NavixEnvironment):
     grid: jnp.ndarray = struct.field(pytree_node=False, default=None)
     wall_pos: jnp.ndarray = struct.field(pytree_node=False, default=None)
+    random_start_state: bool = True
 
     @classmethod
     def create(
@@ -145,6 +169,7 @@ class ASCIIMaze(NavixEnvironment):
             action_space: Space | None = None,
             reward_space: Space | None = None,
             spec: str = 'nav_maze_random_goal_01',
+            random_start_state: bool = False,
             **kwargs,
     ) -> NavixEnvironment:
 
@@ -172,6 +197,7 @@ class ASCIIMaze(NavixEnvironment):
             reward_space=reward_space,
             grid=grid,
             wall_pos=wall_pos,
+            random_start_state=random_start_state,
             **kwargs,
         )
 
@@ -181,6 +207,8 @@ class ASCIIMaze(NavixEnvironment):
 
         # player position
         player_pos = random_positions(player_pos_key, self.grid)
+        if not self.random_start_state:
+            player_pos = jnp.ones_like(player_pos)
         player_dir = random_directions(player_dir_key)
 
         avail_goal_grid = self.grid.at[player_pos].set(-1)
@@ -211,6 +239,15 @@ class ASCIIMaze(NavixEnvironment):
             step_type=jnp.asarray(0, dtype=jnp.int32),
             state=state,
         )
+
+class FixedStartFourRooms(FourRooms):
+    def _reset(self, key: Array, cache: Union[RenderingCache, None] = None) -> Timestep:
+        tstep = super()._reset(key, cache)
+        player = tstep.state.entities['player']
+        tstep.state.entities['player'] = nx.entities.Player.create(position=jnp.ones_like(player.position),
+                                                                   direction=player.direction,
+                                                                   pocket=player.pocket)
+        return tstep
 
 
 def categorical_one_hot_first_person(state: State):
@@ -507,3 +544,51 @@ nx.register_env(
     ),
 )
 
+nx.register_env(
+    "Navix-FixedStartFourRoomsSmall-v0",
+    lambda *args, **kwargs: FixedStartFourRooms.create(
+        height=11,
+        width=11,
+        observation_fn=kwargs.pop("observation_fn", categorical_one_hot_first_person),
+        observation_space=categorical_first_person_obs_space,
+        reward_fn=kwargs.pop("reward_fn", nx.rewards.on_goal_reached),
+        termination_fn=kwargs.pop("termination_fn", nx.terminations.on_goal_reached),
+        *args,
+        **kwargs,
+    ),
+)
+
+nx.register_env(
+    "Navix-FixedStartFourRoomsMedium-v0",
+    lambda *args, **kwargs: ASCIIMaze.create(
+    # lambda *args, **kwargs: FixedStartFourRooms.create(
+        height=19,
+        width=19,
+        observation_fn=kwargs.pop("observation_fn", categorical_one_hot_first_person),
+        observation_space=categorical_first_person_obs_space,
+        reward_fn=kwargs.pop("reward_fn", nx.rewards.on_goal_reached),
+        termination_fn=kwargs.pop("termination_fn", nx.terminations.on_goal_reached),
+        max_steps=500,
+        spec="four_rooms_19_19",
+        random_start_state=False,
+        *args
+    ),
+)
+
+
+nx.register_env(
+    "Navix-FixedStartFourRoomsMedium-F-v0",
+    lambda *args, **kwargs: ASCIIMaze.create(
+    # lambda *args, **kwargs: FixedStartFourRooms.create(
+        height=19,
+        width=19,
+        observation_fn=kwargs.pop("observation_fn", categorical_full_position_encoded),
+        observation_space=categorical_full_positional_obs_space_fn(19, 19),
+        reward_fn=kwargs.pop("reward_fn", nx.rewards.on_goal_reached),
+        termination_fn=kwargs.pop("termination_fn", nx.terminations.on_goal_reached),
+        max_steps=500,
+        spec="four_rooms_19_19",
+        random_start_state=False,
+        *args
+    ),
+)
