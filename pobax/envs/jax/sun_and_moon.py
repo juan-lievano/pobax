@@ -24,12 +24,12 @@ class SunAndMoon(Environment):
     Actions: 0 = clockwise, 1 = counter-clockwise.
     With probability epsilon, the action is flipped.
 
-    Episodes last exactly H steps. Reward is 1 on the final step iff
-    the agent is on the Moon; otherwise 0.
+    Episodes last exactly H steps (H = self.horizon). Reward is 1 on the final
+    step iff the agent is on the Moon; otherwise 0.
 
     Reset: start positions are sampled uniformly from even indices only.
     """
-    def __init__(self, n_states: int = 24, horizon: int = 36, epsilon: float = 0.1):
+    def __init__(self, n_states: int = 12, horizon: int = 24, epsilon: float = 0.1):
         if n_states < 2:
             raise ValueError("n_states must be >= 2.")
         self.N = int(n_states)
@@ -48,6 +48,7 @@ class SunAndMoon(Environment):
 
     @property
     def default_params(self) -> EnvParams:
+        # Kept for API compatibility, but step_env uses self.horizon directly.
         return EnvParams(max_steps_in_episode=self.horizon)
 
     def _obs_from_pos(self, pos: jnp.ndarray) -> jnp.ndarray:
@@ -62,7 +63,7 @@ class SunAndMoon(Environment):
         """
         half = self.N // 2  # number of even indices in [0, N)
         even_slot = random.randint(key, shape=(), minval=0, maxval=half, dtype=jnp.int32)
-        pos = (even_slot * 2) % self.N  # maps 0..half-1 -> even indices
+        pos = (even_slot * 2) % self.N
         state = SunAndMoonState(pos=pos, t=jnp.int32(0))
         obs = self._obs_from_pos(state.pos)
         return obs, state
@@ -84,14 +85,14 @@ class SunAndMoon(Environment):
         key: chex.PRNGKey,
         state: SunAndMoonState,
         action: int,
-        params: EnvParams,
+        params: EnvParams,  # kept for signature compatibility; not used for horizon
     ):
         key, k_act = random.split(key)
         next_pos = self._apply_action(k_act, state.pos, jnp.int32(action))
         next_t = state.t + jnp.int32(1)
         next_state = SunAndMoonState(pos=next_pos, t=next_t)
 
-        done = (next_t >= jnp.int32(params.max_steps_in_episode))
+        done = (next_t >= jnp.int32(self.horizon))  # compare to self.horizon directly
         at_moon = (next_pos == self.moon_idx)
         rew = jnp.where(jnp.logical_and(done, at_moon), 1, 0).astype(jnp.int32)
 
