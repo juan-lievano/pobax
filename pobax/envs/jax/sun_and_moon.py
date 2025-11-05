@@ -11,27 +11,46 @@ from jax import random
 
 @chex.dataclass
 class SunAndMoonState:
+    """
+        pos: Agent position on the ring, int32 in [0, N-1].
+        t:   Time step counter (int32).
+    """
     pos: chex.Array   # int32 in [0, N-1]
     t: chex.Array     # int32 step counter
 
 
 class SunAndMoon(Environment):
     """
-    Ring of N states with one uniquely observable 'Sun' at index 0,
-    and a fixed 'Moon' goal at index N//2. All other states are aliased
-    as identical 'hallway' observations.
+    Configuration
+    -------------
+    - Ring of N states (indices 0..N-1).
+    - 'Sun' is uniquely observable at index 0.
+    - 'Moon' (goal) is fixed at index N//2 (opposite side).
+    - All non-sun, non-terminal states are aliased as "hallway".
+    - Episodes last exactly `horizon` steps; the final observation is terminal (code 2).
 
-    Actions: 0 = clockwise, 1 = counter-clockwise.
-    With probability epsilon, the action is flipped.
+    Actions
+    -------
+    - 0: clockwise
+    - 1: counter-clockwise
+    With probability `epsilon`, the chosen action is flipped.
 
-    Episodes last exactly H steps (H = self.horizon). Reward is 1 on the final
-    step iff the agent is on the Moon; otherwise 0.
+    Observations/reward:
 
-    Reset: start positions are sampled uniformly from even indices only.
+    The agent gets 1 reward if t == horizon - 1 and it is at the moon.
+    The agent should see observation "2" if t == horizon.
+    The episode ends if t == horizon + 1
+
+    Reset
+    -----
+    - Start positions are sampled uniformly from even indices {0, 2, ..., N-2}.
     """
-    def __init__(self, n_states: int = 12, horizon: int = 24, epsilon: float = 0.1):
+
+    def __init__(self, n_states: int = 12, horizon: int = 25, epsilon: float = 0.1):
         if n_states < 2:
             raise ValueError("n_states must be >= 2.")
+        if horizon % 2 == 0:
+            raise ValueError("horizon must be odd or game isn't solvable")
         self.N = int(n_states)
         self.horizon = int(horizon)
         self.epsilon = float(epsilon)
@@ -39,45 +58,39 @@ class SunAndMoon(Environment):
         self.moon_idx = self.N // 2  # fixed opposite
 
     def observation_space(self, env_params: EnvParams):
-        # One-hot over [sun, hallway]. Moon is aliased as hallway.
-        return gymnax.environments.spaces.Box(0, 1, (2,))
+        # Wrap discrete {0,1,2} as Box((1,)) to satisfy wrappers/models.
+        return gymnax.environments.spaces.Box(0, 1, (3,))
+
 
     def action_space(self, env_params: EnvParams):
-        # 0 = clockwise, 1 = counter-clockwise
         return gymnax.environments.spaces.Discrete(2)
 
     @property
     def default_params(self) -> EnvParams:
-        # Kept for API compatibility, but step_env uses self.horizon directly.
-        return EnvParams(max_steps_in_episode=self.horizon)
+        return EnvParams(max_steps_in_episode=1000)  # it ends at horizon anyway
 
-    def _obs_from_pos(self, pos: jnp.ndarray) -> jnp.ndarray:
-        is_sun = (pos == self.sun_idx)
-        # [sun, hallway]; hallway is 1 whenever not sun (moon is aliased)
-        return jnp.array([is_sun, jnp.logical_not(is_sun)], dtype=jnp.uint8)
+    def _obs_from_state(self, pos: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
+        is_terminal = (t == self.horizon)
+        is_sun = (pos == self.sun_idx) & (~is_terminal)
+        is_hallway = (~is_sun) & (~is_terminal)
+        return jnp.array([is_sun, is_hallway, is_terminal], dtype=jnp.uint8)
 
     @partial(jax.jit, static_argnums=(0,))
     def reset_env(self, key, params: EnvParams) -> Tuple[jnp.ndarray, SunAndMoonState]:
-        """
-        Start uniformly from even indices: {0, 2, 4, ..., N-2}.
-        """
-        half = self.N // 2  # number of even indices in [0, N)
+        """Reset: uniformly sample an even index; t = 0; return obs(Box(1,)), state."""
+        half = self.N // 2  # number of even indices
         even_slot = random.randint(key, shape=(), minval=0, maxval=half, dtype=jnp.int32)
         pos = (even_slot * 2) % self.N
         state = SunAndMoonState(pos=pos, t=jnp.int32(0))
-        obs = self._obs_from_pos(state.pos)
+        obs = self._obs_from_state(state.pos, state.t)
         return obs, state
 
     def _apply_action(self, key: chex.PRNGKey, pos: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
-        """
-        action: {0 (clockwise), 1 (counter-clockwise)}
-        With prob epsilon, flip the action.
-        """
+        """Apply action with flip-noise epsilon; return next position (int32)."""
         flip = random.bernoulli(key, p=self.epsilon)
         intended_delta = jnp.where(action == 0, 1, -1).astype(jnp.int32)  # +1 or -1
         delta = jnp.where(flip, -intended_delta, intended_delta)
-        new_pos = jnp.mod(pos + delta, self.N).astype(jnp.int32)
-        return new_pos
+        return jnp.mod(pos + delta, self.N).astype(jnp.int32)
 
     @partial(jax.jit, static_argnums=(0,))
     def step_env(
@@ -85,17 +98,25 @@ class SunAndMoon(Environment):
         key: chex.PRNGKey,
         state: SunAndMoonState,
         action: int,
-        params: EnvParams,  # kept for signature compatibility; not used for horizon
+        params: EnvParams,
     ):
+        """One environment step with terminal obs at the boundary."""
         key, k_act = random.split(key)
+
+        # Next state
         next_pos = self._apply_action(k_act, state.pos, jnp.int32(action))
         next_t = state.t + jnp.int32(1)
         next_state = SunAndMoonState(pos=next_pos, t=next_t)
 
-        done = (next_t >= jnp.int32(self.horizon))  # compare to self.horizon directly
-        at_moon = (next_pos == self.moon_idx)
-        rew = jnp.where(jnp.logical_and(done, at_moon), 1, 0).astype(jnp.int32)
+        # Termination 
+        done = (state.t == jnp.int32(self.horizon) + 1)
 
-        obs = self._obs_from_pos(next_pos)
+        # Reward
+        reward = (state.t == (self.horizon - 1)) & (state.pos == self.moon_idx)
+
+        # Observation (terminal code 2 when t >= horizon)
+        obs = self._obs_from_state(next_pos, next_t)
+
         info = {}
-        return obs, next_state, rew, done, info
+
+        return obs, next_state, reward, done, info
