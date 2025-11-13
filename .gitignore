@@ -169,3 +169,5 @@ scripts/bayesian_posterior_probe/supervised_learning_data/*.csv
 scripts/bayesian_posterior_probe/memory_probe_results_linear/
 scripts/bayesian_posterior_probe/memory_probe_results_linear_jax/
 scripts/bayesian_posterior_probe/memory_probe_results_mlp/
+scripts/bayesian_posterior_probe/probe_evaluations/
+legacy_results/
