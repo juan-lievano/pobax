@@ -39,6 +39,10 @@ def _iter_params_leaves(p: Any, path: Tuple[str, ...] = ()) -> Iterable[Tuple[Tu
 
 
 def infer_expected_input_dim(params_tree: Dict, hidden_size: int) -> Optional[int]:
+    '''
+    pretty sure this will return the dimension of the input without counting the self-feeding state
+    so the actual input dimension will be whatever this returns + hidden_size
+    '''
     candidate = None
     for path, leaf in _iter_params_leaves(params_tree):
         if not isinstance(leaf, (np.ndarray, jnp.ndarray)):
@@ -81,9 +85,7 @@ def rollout_single_trajectory(
 
         done_flag = done[None, None]
 
-        # This hidden_output is the hidden state to record for the current row (time_step = t).
-        hidden_output = hidden_state
-
+        # Forward pass with current obs_t and previous hidden h_{t-1}
         hidden_state_new, action_distribution, _ = apply_fn(weights, hidden_state, (network_input, done_flag))
         action = action_distribution.sample(seed=rng_sample)[0, 0].astype(jnp.int32)
 
@@ -94,6 +96,10 @@ def rollout_single_trajectory(
         pos_output = state.pos
         dir_output = state.dir
 
+        # Record the hidden state produced at time t (use old value if already done)
+        hidden_output = jnp.where(done, hidden_state, hidden_state_new)
+
+        # Advance carry (guarded by done)
         obs = jnp.where(done, obs, next_obs.astype(jnp.float32))
         hidden_state = jnp.where(done, hidden_state, hidden_state_new)
         prev_action = jnp.where(done, prev_action, init_prev_action_onehot(prev_action_dim, action))
@@ -262,16 +268,19 @@ def _beliefs_for_trajectory(
     grid_size: int,
     _obs_masks_unused: Tuple[np.ndarray, ...],
 ) -> list:
+    # Start with an uninformative prior
     prior_mask = _initial_belief_mask(grid_size)
-    beliefs = [_normalize_mask(prior_mask).tolist()]
-    if trajectory_length <= 1:
-        return beliefs
-    for t in range(1, trajectory_length):
-        obs_prev = obs_seq[t - 1]
-        act_prev = int(action_seq[t - 1])
-        posterior_mask = _apply_observation_filter(prior_mask, obs_prev, grid_size)
-        prior_mask = _transition_mask_precise(posterior_mask, act_prev, grid_size) 
-        beliefs.append(_normalize_mask(prior_mask).tolist()) # it's done in two lines (but the newest belief end's up depending on obs_prev and act_prev)
+    beliefs = []
+
+    for t in range(trajectory_length):
+        # Posterior after seeing obs_t
+        posterior_mask = _apply_observation_filter(prior_mask, obs_seq[t], grid_size)
+        beliefs.append(_normalize_mask(posterior_mask).tolist())
+
+        # Prepare prior for next step (apply action_t), except after the last row
+        if t < trajectory_length - 1:
+            prior_mask = _transition_mask_precise(posterior_mask, int(action_seq[t]), grid_size)
+
     return beliefs
 
 
@@ -329,7 +338,6 @@ def shard_to_rows(
             # keep raw hidden state shape, do not flatten/trim
             h_slice = np.asarray(hidden_array[local_id, :trajectory_length])
             rows["rnn_hidden"].extend([h_slice[t].tolist() for t in range(trajectory_length)])
-
 
     return rows
 
